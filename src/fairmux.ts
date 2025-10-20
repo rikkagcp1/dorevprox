@@ -9,20 +9,28 @@ import * as utils from "./utils"
 // - 公平性：round-robin，每次 pull 只从一个输入发“一份单位”数据（residue<=1KiB 或 1 帧）
 // - 使用 Web Streams 的 ReadableStream（非 Node streams），并在 out 的 constructor 中使用 pull
 
+export interface Datagram {
+	info: muxcool.MuxcoolConnectionInfo | null;
+	data: Uint8Array;
+}
+
 interface InputState {
 	// Info
 	id: number;
-	info: muxcool.MuxcoolConnectionInfo;
 
 	// Reading
-	reader: ReadableStreamDefaultReader<Uint8Array>;
-	chunkPending: Uint8Array | null;
+	reader: ReadableStreamDefaultReader<Datagram>;
+	chunkPending: Datagram | null;
 	promisePending: Promise<void> | null;
+
+	// Writing
+	writer: WritableStreamDefaultWriter<Datagram>;
 
 	// States
 	sentSubLinkNew: boolean;
 	done: boolean;
 }
+
 
 const NOP = () => { };
 
@@ -55,19 +63,40 @@ export class FairMux {
 	 * Traffic to be demuxed
 	 */
 	readonly in: WritableStream<muxcool.MuxcoolFrame> = new WritableStream<muxcool.MuxcoolFrame>({
-		write(chunk, controller) {
+		write: async (chunk, controller) => {
+			const st = this.inputs.get(chunk.header.id);
+			if (!st)
+				throw new Error(`Unknown sublink id: ${chunk.header.id}`);
+
+			if (chunk.header.opcode == muxcool.MuxcoolOpCode.SUB_LINK_END || 
+				chunk.header.opcode == muxcool.MuxcoolOpCode.KEEP_ALIVE) {
+				// Control frames
+				return;
+			}
+
+			if (!(chunk.header.options & muxcool.MuxcoolOptions.HAS_DATA)) {
+				return;
+			}
+			const data = chunk.payload!;
+			await st.writer.ready;
+			await st.writer.write({
+				info: chunk.header.connectionInfo,
+				data,
+			});
+
 			console.log(JSON.stringify(chunk))
 		},
 	} as UnderlyingSink<muxcool.MuxcoolFrame>)
 
-	addInput(rs: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, connectionInfo: muxcool.MuxcoolConnectionInfo): number {
+	addInput(rs: ReadableStream<Datagram>, writable: WritableStream<Datagram>): number {
 		const id = this.allocId();
 		const reader = rs.getReader();
+		const writer = writable.getWriter();
 
 		const st: InputState = {
 			id,
-			info: connectionInfo,
 			reader,
+			writer,
 			chunkPending: null,
 			promisePending: null,
 			sentSubLinkNew: false,
@@ -147,9 +176,9 @@ export class FairMux {
 							id: st.id,
 							opcode: muxcool.MuxcoolOpCode.SUB_LINK_KEEP,
 							options: 1,
-							connectionInfo: null
+							connectionInfo: chunk.info
 						},
-						payload: chunk,
+						payload: chunk.data,
 					});
 				} else {
 					st.sentSubLinkNew = true;
@@ -158,9 +187,9 @@ export class FairMux {
 							id: st.id,
 							opcode: muxcool.MuxcoolOpCode.SUB_LINK_NEW,
 							options: 1,
-							connectionInfo: st.info
+							connectionInfo: chunk.info
 						},
-						payload: chunk,
+						payload: chunk.data,
 					});
 				}
 

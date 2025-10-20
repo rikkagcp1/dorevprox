@@ -13,6 +13,10 @@ export const enum MuxcoolOpCode {
 	KEEP_ALIVE = 4,
 }
 
+export const enum MuxcoolOptions {
+	HAS_DATA = 1,
+}
+
 export interface MuxcoolHeader {
 	id: number;
 	opcode: MuxcoolOpCode;
@@ -135,7 +139,7 @@ export function newMuxcoolFrameDecoder(): TransformStream<Uint8Array, MuxcoolFra
 
 					const header = h.value;
 					// If the least significant bit indicates a payload follows
-					if (header.options & 0x01) {
+					if (header.options & MuxcoolOptions.HAS_DATA) {
 						pendingHeader = header;
 					} else {
 						// No payload: emit a frame with header only

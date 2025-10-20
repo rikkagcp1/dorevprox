@@ -65,17 +65,17 @@ function checkUUID(uuid: Uint8Array) {
 	return true; // TODO: Fix me
 }
 
-function createTestSource(interval: number, count?: number) {
-	return new ReadableStream({
+function createTestSource(dest: muxcool.MuxcoolConnectionInfo | null, interval: number, count?: number) {
+	return new ReadableStream<fairmux.Datagram>({
 		start(controller) {
-			const keepAlive = () => {
+			const sendDatagram = () => {
 				const length = utils.randomInt(3, 10);
 				const chunk = new Uint8Array(length);
 				for (let i = 0; i < chunk.byteLength - 1; i++) {
 					chunk[i] = utils.randomInt(97, 97 + 26);
 				}
 				chunk[chunk.byteLength - 1] = 10;
-				controller.enqueue(chunk);
+				controller.enqueue({info: dest, data: chunk});
 				console.log(`Random data sent to outlet ${new TextDecoder().decode(chunk.subarray(0, chunk.byteLength - 1))}`);
 
 				if (count) {
@@ -86,26 +86,26 @@ function createTestSource(interval: number, count?: number) {
 					}
 				}
 
-				setTimeout(keepAlive, interval);
+				setTimeout(sendDatagram, interval);
 			}
-			keepAlive();
+			sendDatagram();
 		},
 	});
 }
 
 function createDummySink(prefix = "") {
-	return new WritableStream<Uint8Array>({
-		write(chunk, controller) {
-			console.log(`${prefix} Sent to remote sink: ${chunk.byteLength} bytes`);
-			utils.hexdump(chunk);
+	return new WritableStream<fairmux.Datagram>({
+		write: (chunk, controller) => {
+			console.log(`${prefix} Sent to remote sink: ${chunk.data.byteLength} bytes`);
+			utils.hexdump(chunk.data);
 		},
-	} as UnderlyingSink<Uint8Array>)
+	} as UnderlyingSink<fairmux.Datagram>)
 }
 
-function createMasterKeepalive() {
+function createMasterKeepalive(): ReadableStream<fairmux.Datagram> {
 	return new ReadableStream({
 		start(controller) {
-			const keepAlive = () => {
+			const keepAlive = (dest?: muxcool.MuxcoolConnectionInfo) => {
 				const length = utils.randomInt(4, 100);
 				const chunk = new Uint8Array(3 + length);
 				// A Protobuf string
@@ -115,11 +115,23 @@ function createMasterKeepalive() {
 				for (let i = 3; i < chunk.byteLength; i++) {
 					chunk[i] = Math.floor(Math.random() * 256);
 				}
-				controller.enqueue(chunk);
+				controller.enqueue({
+					info: dest ? dest : null,
+					data: chunk,
+				});
 				// console.log(`Keep alive sent to outlet ${length}`);
 				setTimeout(keepAlive, 5000);
 			}
-			keepAlive();
+
+			// First packet
+			keepAlive({
+				networkType: muxcool.NetworkType.UDP,
+				address: {
+					addr: "reverse.internal.v2fly.org",
+					addrType: address.AddrType.DomainName,
+				},
+				port: 0
+			});
 		},
 	});
 }
@@ -155,23 +167,16 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 					info: new Uint8Array(0),
 				};
 
-				mux.addInput(createMasterKeepalive(), createDummySink(), {
-					networkType: muxcool.NetworkType.UDP,
-					address: {
-						addr: "reverse.internal.v2fly.org",
-						addrType: address.AddrType.DomainName,
-					},
-					port: 0
-				});
+				mux.addInput(createMasterKeepalive(), createDummySink());
 
-				mux.addInput(createTestSource(2000), createDummySink(), {
+				mux.addInput(createTestSource({
 					networkType: muxcool.NetworkType.UDP,
 					address: {
 						addr: "127.0.0.1",
 						addrType: address.AddrType.DomainName,
 					},
 					port: 2323
-				});
+				}, 2000), createDummySink());
 
 				mux.out.pipeThrough(muxcool.newMuxcollFrameEncoder(vlessResponse, codecVlessResponseHeader))
 					.pipeTo(opened.writable).catch((err) => {
