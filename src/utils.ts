@@ -71,7 +71,7 @@ export function randomInt(min: number, max: number): number {
 	return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-export function newPromiseWithHandle<T>(): {
+export function newPromiseWithHandle<T = void>(): {
 	resolve: (value: T | PromiseLike<T>) => void;
 	reject: (reason?: unknown) => void;
 	promise: Promise<T>;

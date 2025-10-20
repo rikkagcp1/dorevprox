@@ -24,49 +24,43 @@ interface InputState {
 	done: boolean;
 }
 
-const NOP = () => {};
+const NOP = () => { };
 
 export class FairMux {
 	private inputs = new Map<number, InputState>();
 	private rrOrder: number[] = [];
 	private nextId = 1; // 16-bit 回绕
-	private running = false;
 	private available: () => void = NOP;
 
-	readonly out: ReadableStream<muxcool.MuxcoolFrame>;
+	/**
+	 * Muxed Traffic
+	 */
+	readonly out: ReadableStream<muxcool.MuxcoolFrame> = new ReadableStream<muxcool.MuxcoolFrame>({
+		pull: (controller) => {
+			console.log("FairMux: pull");
 
-	constructor() {
-		this.out = new ReadableStream<muxcool.MuxcoolFrame>({
-			start: (controller) => {
-				this.running = true;
-			},
-			pull: (controller) => {
-				console.log("FairMux pull")
-				if (!this.running)
-					return;
+			// 一次 pull 只尝试发出“一份单位”（公平分时）
+			return this.tryEmitOne(controller);
+		},
+		cancel: () => {
+			for (const st of this.inputs.values()) {
+				try { st.reader.cancel(); } catch { }
+			}
+			this.inputs.clear();
+			this.rrOrder = [];
+		},
+	});
 
-				// 如果没有任何输入且没有待发内容，直接关闭
-				if (this.inputs.size === 0) {
-					controller.close();
-					this.running = false;
-					return;
-				}
+	/**
+	 * Traffic to be demuxed
+	 */
+	readonly in: WritableStream<muxcool.MuxcoolFrame> = new WritableStream<muxcool.MuxcoolFrame>({
+		write(chunk, controller) {
+			console.log(JSON.stringify(chunk))
+		},
+	} as UnderlyingSink<muxcool.MuxcoolFrame>)
 
-				// 一次 pull 只尝试发出“一份单位”（公平分时）
-				return this.tryEmitOne(controller);
-			},
-			cancel: () => {
-				this.running = false;
-				for (const st of this.inputs.values()) {
-					try { st.reader.cancel(); } catch { }
-				}
-				this.inputs.clear();
-				this.rrOrder = [];
-			},
-		});
-	}
-
-	addInput(rs: ReadableStream<Uint8Array>, connectionInfo: muxcool.MuxcoolConnectionInfo): number {
+	addInput(rs: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>, connectionInfo: muxcool.MuxcoolConnectionInfo): number {
 		const id = this.allocId();
 		const reader = rs.getReader();
 
@@ -149,7 +143,12 @@ export class FairMux {
 
 				if (st.sentSubLinkNew) {
 					controller.enqueue({
-						header: { id: st.id, opcode: muxcool.MuxcoolOpCode.SUB_LINK_KEEP, options: 1 },
+						header: {
+							id: st.id,
+							opcode: muxcool.MuxcoolOpCode.SUB_LINK_KEEP,
+							options: 1,
+							connectionInfo: null
+						},
 						payload: chunk,
 					});
 				} else {
@@ -159,8 +158,8 @@ export class FairMux {
 							id: st.id,
 							opcode: muxcool.MuxcoolOpCode.SUB_LINK_NEW,
 							options: 1,
-							...st.info,
-						} as any,
+							connectionInfo: st.info
+						},
 						payload: chunk,
 					});
 				}
@@ -170,9 +169,14 @@ export class FairMux {
 
 			if (st.done) {
 				controller.enqueue({
-					header: { id: st.id, opcode: muxcool.MuxcoolOpCode.SUB_LINK_END, options: 0 },
+					header: {
+						id: st.id,
+						opcode: muxcool.MuxcoolOpCode.SUB_LINK_END,
+						options: 0,
+						connectionInfo: null,
+					},
 				});
-				
+
 				// Remove this sublink from internal state
 				this.inputs.delete(st.id);
 				this.rrOrder = this.rrOrder.filter(x => x !== st.id);

@@ -65,34 +65,38 @@ function checkUUID(uuid: Uint8Array) {
 	return true; // TODO: Fix me
 }
 
-function createTestSource(count: number) {
+function createTestSource(interval: number, count?: number) {
 	return new ReadableStream({
 		start(controller) {
 			const keepAlive = () => {
 				const length = utils.randomInt(3, 10);
 				const chunk = new Uint8Array(length);
 				for (let i = 0; i < chunk.byteLength - 1; i++) {
-					chunk[i] = utils.randomInt(97, 97+26);
+					chunk[i] = utils.randomInt(97, 97 + 26);
 				}
 				chunk[chunk.byteLength - 1] = 10;
 				controller.enqueue(chunk);
 				console.log(`Random data sent to outlet ${new TextDecoder().decode(chunk.subarray(0, chunk.byteLength - 1))}`);
 
-				count--;
-				if (count)
-					setTimeout(keepAlive, 500);
-				else
-					controller.close();
+				if (count) {
+					count--;
+					if (count === 0) {
+						controller.close();
+						return;
+					}
+				}
+
+				setTimeout(keepAlive, interval);
 			}
 			keepAlive();
 		},
 	});
 }
 
-function createDummySink() {
+function createDummySink(prefix = "") {
 	return new WritableStream<Uint8Array>({
 		write(chunk, controller) {
-			console.log(`Sent to remote sink: ${chunk.byteLength} bytes`);
+			console.log(`${prefix} Sent to remote sink: ${chunk.byteLength} bytes`);
 			utils.hexdump(chunk);
 		},
 	} as UnderlyingSink<Uint8Array>)
@@ -145,14 +149,13 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 				vlessRequest.address.addr === PORTAL_DOMAIN_NAME) {
 
 				// Reverse proxy request
-				remoteTrafficSink = createDummySink();
 				const mux = new fairmux.FairMux();
-				let vlessResponse:VlessResponseHeader | null = {
+				const vlessResponse: VlessResponseHeader = {
 					version: vlessRequest.version,
 					info: new Uint8Array(0),
-				}
+				};
 
-				mux.addInput(createMasterKeepalive(), {
+				mux.addInput(createMasterKeepalive(), createDummySink(), {
 					networkType: muxcool.NetworkType.UDP,
 					address: {
 						addr: "reverse.internal.v2fly.org",
@@ -161,7 +164,7 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 					port: 0
 				});
 
-				mux.addInput(createTestSource(5), {
+				mux.addInput(createTestSource(2000), createDummySink(), {
 					networkType: muxcool.NetworkType.UDP,
 					address: {
 						addr: "127.0.0.1",
@@ -170,30 +173,14 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 					port: 2323
 				});
 
-				mux.out.pipeThrough(new TransformStream<muxcool.MuxcoolFrame, Uint8Array>({
-					transform(chunk, controller) {
-						const muxcoolFrameLen = muxcool.codecU16BESizedMuxcoolHeaders.byteLength(chunk.header)
-							+ (chunk.payload ? codec.codecU16BESizedBytes.byteLength(chunk.payload) : 0);
-
-						const length = vlessResponse ? codecVlessResponseHeader.byteLength(vlessResponse) + muxcoolFrameLen : muxcoolFrameLen;
-						const buffer = new Uint8Array(length);
-						const ctx = new codec.CodecContext(buffer);
-
-						if (vlessResponse) {
-							codecVlessResponseHeader.write(vlessResponse, ctx);
-							vlessResponse = null;
-							console.log(JSON.stringify(vlessRequest));
-						}
-						muxcool.codecU16BESizedMuxcoolHeaders.write(chunk.header, ctx);
-						if (chunk.payload) {
-							codec.codecU16BESizedBytes.write(chunk.payload, ctx);
-						}
-
-						controller.enqueue(buffer);
-					},
-				})).pipeTo(opened.writable).catch((err) => {
+				mux.out.pipeThrough(muxcool.newMuxcollFrameEncoder(vlessResponse, codecVlessResponseHeader))
+					.pipeTo(opened.writable).catch((err) => {
 					console.log(err);
 				});
+
+				const muxcoolFrameDecoder = muxcool.newMuxcoolFrameDecoder();
+				remoteTrafficSink = muxcoolFrameDecoder.writable;
+				muxcoolFrameDecoder.readable.pipeTo(mux.in);
 			}
 		},
 	} as UnderlyingSink<Uint8Array>);
@@ -216,12 +203,11 @@ function makeVlessHeaderProcessor() {
 	let vlessRequestHeaderPart1: VlessRequestHeaderPart1 | null = null;
 	let vlessRequestHeader: VlessRequestHeader | null = null;
 
-	let vlessRequestHeaderPromiseResolve: (result: VlessRequestHeader) => void;
-	let vlessRequestHeaderPromiseReject: (error: any) => void;
-	const vlessHeaderPromise = new Promise<VlessRequestHeader>((resolve, reject) => {
-		vlessRequestHeaderPromiseResolve = resolve;
-		vlessRequestHeaderPromiseReject = reject;
-	});
+	const {
+		resolve: vlessRequestHeaderPromiseResolve,
+		reject: vlessRequestHeaderPromiseReject,
+		promise: vlessHeaderPromise,
+	} = utils.newPromiseWithHandle<VlessRequestHeader>();
 
 	const parser = new TransformStream<Uint8Array, Uint8Array>({
 		transform(chunk, controller) {
