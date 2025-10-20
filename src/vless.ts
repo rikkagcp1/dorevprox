@@ -6,9 +6,6 @@ import * as fairmux from "./fairmux"
 import * as muxcool from "./muxcool";
 
 const PORTAL_DOMAIN_NAME = "cyka.blayt.su";
-const maxMuxCurrency = 8;
-
-export type UUID = Uint8Array & { readonly length: 16 };
 
 export const enum InstructionType {
 	TCP = 1,
@@ -18,7 +15,7 @@ export const enum InstructionType {
 
 export interface VlessRequestHeaderPart1 {
 	version: number;
-	uuid: UUID;
+	uuid: Uint8Array;
 }
 
 export interface VlessRequestHeaderPart2 {
@@ -51,19 +48,6 @@ export const codecVlessResponseHeader = codec.codecOf<VlessResponseHeader>(
 	{ key: "version", codec: codec.codecU8 },
 	{ key: "info", codec: codec.codecU8SizedBytes },
 );
-
-function equalUint8Array(a: Uint8Array, b: Uint8Array): boolean {
-	if (a === b) return true;
-	if (a.byteLength !== b.byteLength) return false;
-	for (let i = 0; i < a.byteLength; i++) {
-		if (a[i] !== b[i]) return false;
-	}
-	return true;
-}
-
-function checkUUID(uuid: Uint8Array) {
-	return true; // TODO: Fix me
-}
 
 function createTestSource(dest: muxcool.MuxcoolConnectionInfo | null, interval: number, count?: number) {
 	let taskId = NaN;
@@ -153,6 +137,8 @@ function createMasterKeepalive(): ReadableStream<fairmux.Datagram> {
 export class SharedContext {
 	private portals: fairmux.FairMux[] = [];
 
+	constructor(readonly checkUuid: (uuid: Uint8Array, isPortal: boolean) => boolean) {}
+
 	addPortal(portal: fairmux.FairMux) {
 		this.portals.push(portal);
 	}
@@ -198,10 +184,17 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 				return;
 			}
 
-			// Reverse proxy
 			if (vlessRequest.instruction == InstructionType.TCP &&
 				vlessRequest.address.addrType == address.AddrType.DomainName &&
 				vlessRequest.address.addr === PORTAL_DOMAIN_NAME) {
+				// Reversed proxy
+
+				// Check uuid
+				if (!sharedContext.checkUuid(vlessRequest.uuid, true)) {
+					console.error("[Portal] UUID is invalid");
+					websocketStream.close();
+					return;
+				}
 
 				// Reverse proxy request
 				const mux = new fairmux.FairMux();
@@ -239,6 +232,13 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 				console.log(`[Portal] new portal joined, ${sharedContext.countPortal} available.`);
 			} else if (vlessRequest.instruction == InstructionType.TCP || vlessRequest.instruction == InstructionType.UDP) {
 				// Normal proxy
+
+				// Check uuid
+				if (!sharedContext.checkUuid(vlessRequest.uuid, false)) {
+					console.error("[Portal] UUID is invalid");
+					websocketStream.close();
+					return;
+				}
 
 				const mux = sharedContext.findPortal();
 				if (mux == null) {
@@ -338,12 +338,6 @@ function makeVlessHeaderProcessor() {
 			} else if (part1Decoder) {
 				const outcome1 = part1Decoder(chunk);
 				if (outcome1.done) {
-					if (!checkUUID(outcome1.value.uuid)) {
-						const error = new Error("Wrong UUID");
-						vlessRequestHeaderPromiseReject(error);
-						controller.error(error);
-					}
-
 					vlessRequestHeaderPart1 = outcome1.value;
 					part2Decoder = codec.createIncrementalDeserializer(codecVlessRequestHeaderPart2);
 					part1Decoder = null;

@@ -88,11 +88,18 @@ export class WebSocketHibernationServer extends DurableObject {
 	// Keeps track of all WebSocket connections
 	// When the DO hibernates, gets reconstructed in the constructor
 	sessions: Map<WebSocket, WebSocketConnection>;
-	vlessSharedContext = new vless.SharedContext();
+	vlessSharedContext;
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
+
+		const uuid_portal = utils.uuidToUint8Array(env.UUID_PORTAL);
+		const uuid_client = utils.uuidToUint8Array(env.UUID_CLIENT);
+
 		this.sessions = new Map();
+		this.vlessSharedContext = new vless.SharedContext((uuid, isPortal) => {
+			return utils.equalUint8Array(uuid, isPortal ? uuid_portal : uuid_client);
+		});
 
 		// As part of constructing the Durable Object,
 		// we wake up any hibernating WebSockets and

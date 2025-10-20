@@ -86,3 +86,37 @@ export function newPromiseWithHandle<T = void>(): {
 
 	return { resolve, reject, promise };
 }
+
+export function uuidToUint8Array(uuid: string): Uint8Array {
+	// Check base format: 8-4-4-4-12, 36 chars in total
+	const uuidRegex = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
+	if (!uuidRegex.test(uuid)) {
+		throw new Error("Invalid UUID format");
+	}
+
+	const hex = uuid.replace(/-/g, "");
+	if (hex.length !== 32) {
+		throw new Error("Invalid UUID length");
+	}
+
+	const bytes = new Uint8Array(16);
+	for (let i = 0; i < 16; i++) {
+		const byte = hex.substr(i * 2, 2);
+		const value = parseInt(byte, 16);
+		if (isNaN(value)) {
+			throw new Error(`Invalid hex at position ${i * 2}`);
+		}
+		bytes[i] = value;
+	}
+
+	return bytes;
+}
+
+export function equalUint8Array(a: Uint8Array, b: Uint8Array): boolean {
+	if (a === b) return true;
+	if (a.byteLength !== b.byteLength) return false;
+	for (let i = 0; i < a.byteLength; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
+}
