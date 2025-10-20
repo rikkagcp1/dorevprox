@@ -233,7 +233,7 @@ export class FairMux {
 
 		st.promisePending = st.reader.read().then(({done, value}) => {
 			st.promisePending = null;
-			console.log(`[Fairmux]: sublink ${st.id} read, done: ${done}`);
+			// console.log(`[Fairmux]: sublink ${st.id} read, done: ${done}`);
 
 			if (done) {
 				// End of sublink ReadableStream
@@ -286,7 +286,7 @@ export class FairMux {
 				const chunk = st.chunkPending;
 				st.chunkPending = null;
 
-				console.debug(`[FairMux] Enqueue chunk for sublink ${st.id}`);
+				// console.debug(`[FairMux] Enqueue chunk for sublink ${st.id}`);
 
 				if (st.sentSubLinkNew) {
 					controller.enqueue({

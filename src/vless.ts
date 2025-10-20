@@ -139,8 +139,14 @@ export class SharedContext {
 
 	constructor(readonly checkUuid: (uuid: Uint8Array, isPortal: boolean) => boolean) {}
 
-	addPortal(portal: fairmux.FairMux) {
+	/**
+	 * Add a portal to the list
+	 * @param portal 
+	 * @returns a function that removes this portal from the list
+	 */
+	addPortal(portal: fairmux.FairMux): ()=>void {
 		this.portals.push(portal);
+		return () => this.portals = this.portals.filter(x => x !== portal);
 	}
 
 	/**
@@ -223,12 +229,13 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 				remoteTrafficSink = muxcoolFrameDecoder.writable;
 				muxcoolFrameDecoder.readable.pipeTo(mux.in);
 
+				const portalRemover = sharedContext.addPortal(mux);
 				websocketStream.closed.finally(async () => {
 					mux.terminate(true);
+					portalRemover();
 					console.log(`[Portal] portal left, ${sharedContext.countPortal} available.`);
 				});
 	
-				sharedContext.addPortal(mux);
 				console.log(`[Portal] new portal joined, ${sharedContext.countPortal} available.`);
 			} else if (vlessRequest.instruction == InstructionType.TCP || vlessRequest.instruction == InstructionType.UDP) {
 				// Normal proxy
@@ -239,6 +246,8 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 					websocketStream.close();
 					return;
 				}
+				const protocolString = vlessRequest.instruction == InstructionType.TCP ? "TCP" : "UDP";
+				console.log(`[Inbound] new request to ${protocolString}:${address.addressToString(vlessRequest.address)}:${vlessRequest.port}`);
 
 				const mux = sharedContext.findPortal();
 				if (mux == null) {

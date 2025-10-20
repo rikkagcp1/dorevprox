@@ -66,18 +66,18 @@ export const codec_address: codec.Codec<Address> = {
 		}
 	},
 	read: (context) => {
-		const addrType:AddrType = context.shift();
+		const addrType: AddrType = context.shift();
 		switch (addrType) {
-			case AddrType.IPv4: 
-				return {addrType, addr: context.shiftBy(4)} as IPv4Address;
+			case AddrType.IPv4:
+				return { addrType, addr: context.shiftBy(4) } as IPv4Address;
 			case AddrType.DomainName: {
 				const length = context.shift();
 				const bytes = context.shiftBy(length);
 				const domainName = new TextDecoder().decode(bytes);
-				return {addrType, addr: domainName};
+				return { addrType, addr: domainName };
 			}
 			case AddrType.IPv6:
-				return {addrType, addr: context.shiftBy(16)} as IPv6Address;
+				return { addrType, addr: context.shiftBy(16) } as IPv6Address;
 			default:
 				throw new Error(`Unknown AddrType: ${String(addrType)}`);
 		}
@@ -103,4 +103,37 @@ export function string2IPv4(addrStr: string): IPv4Address {
 		addrType: AddrType.IPv4,
 		addr,
 	};
+}
+
+export function ipv4ToString(addr: IPv4Address): string {
+	const parts = Array.from(addr.addr);
+	return parts.join('.');
+}
+
+export function ipv6ToString(addr: IPv6Address): string {
+	const parts: string[] = [];
+	for (let i = 0; i < 16; i += 2) {
+		const segment = (addr.addr[i] << 8) | addr.addr[i + 1];
+		parts.push(segment.toString(16));
+	}
+	// 压缩连续的0段
+	let ipv6 = parts.join(':').replace(/(:0)+:/, '::');
+	return "[" + ipv6 + "]";
+}
+
+export function domainToString(addr: DomainAddress): string {
+	return addr.addr;
+}
+
+export function addressToString(address: Address): string {
+	switch (address.addrType) {
+		case AddrType.IPv4:
+			return ipv4ToString(address);
+		case AddrType.IPv6:
+			return ipv6ToString(address);
+		case AddrType.DomainName:
+			return domainToString(address);
+		default:
+			throw new Error(`Unknown AddrType: ${(address as any)?.addrType}`);
+	}
 }
