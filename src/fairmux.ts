@@ -161,12 +161,18 @@ export class FairMux {
 		console.debug("[FairMux] terminated");
 	}
 
-	addInput(rs: ReadableStream<Datagram>, writable: WritableStream<Datagram>): number {
+	/**
+	 * 
+	 * @param readable sink
+	 * @param writable source
+	 * @returns assigned sublink id
+	 */
+	addInput(readable: ReadableStream<Datagram>, writable: WritableStream<Datagram>): number {
 		if (this.terminated)
 			throw new Error("FairMux terminated");
 
 		const id = this.allocId();
-		const reader = rs.getReader();
+		const reader = readable.getReader();
 		const writer = writable.getWriter();
 
 		const st: InputState = {

@@ -50,7 +50,7 @@ export class WebSocketHibernationServer extends DurableObject {
 	// Keeps track of all WebSocket connections
 	// When the DO hibernates, gets reconstructed in the constructor
 	sessions: Map<WebSocket, WebSocketConnection>;
-	vlessSharedContext: vless.SharedContext = vless.defaultSharedContext();
+	vlessSharedContext = new vless.SharedContext();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);

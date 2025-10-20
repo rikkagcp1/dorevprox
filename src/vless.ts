@@ -150,17 +150,27 @@ function createMasterKeepalive(): ReadableStream<fairmux.Datagram> {
 	});
 }
 
-export interface SharedContext {
-	portals: fairmux.FairMux[];
-}
+export class SharedContext {
+	private portals: fairmux.FairMux[] = [];
 
-export function defaultSharedContext(): SharedContext {
-	return {
-		portals: []
+	addPortal(portal: fairmux.FairMux) {
+		this.portals.push(portal);
+	}
+
+	findPortal(): fairmux.FairMux | null {
+		for (const portal of this.portals) {
+			if (portal.count < 100)
+				return portal;
+		}
+		return null;
+	}
+
+	get countPortal() {
+		return this.portals.length;
 	}
 }
 
-export async function handleVlessRequest(websocketStream: wsstream.WebSocketStreamLike, context: SharedContext) {
+export async function handleVlessRequest(websocketStream: wsstream.WebSocketStreamLike, sharedContext: SharedContext) {
 	const opened = await websocketStream.opened;
 	const { parser: vlessRequestProcessor, vlessHeaderPromise: vlessRequestPromise } = makeVlessHeaderProcessor();
 
@@ -180,6 +190,7 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 				return;
 			}
 
+			// Reverse proxy
 			if (vlessRequest.instruction == InstructionType.TCP &&
 				vlessRequest.address.addrType == address.AddrType.DomainName &&
 				vlessRequest.address.addr === PORTAL_DOMAIN_NAME) {
@@ -193,14 +204,14 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 
 				mux.addInput(createMasterKeepalive(), createDummySink());
 
-				mux.addInput(createTestSource({
-					networkType: muxcool.NetworkType.UDP,
-					address: {
-						addr: "127.0.0.1",
-						addrType: address.AddrType.DomainName,
-					},
-					port: 2323
-				}, 2000, 5), createDummySink());
+				// mux.addInput(createTestSource({
+				// 	networkType: muxcool.NetworkType.UDP,
+				// 	address: {
+				// 		addr: "127.0.0.1",
+				// 		addrType: address.AddrType.DomainName,
+				// 	},
+				// 	port: 2323
+				// }, 2000, 5), createDummySink());
 
 				mux.out.pipeThrough(muxcool.newMuxcollFrameEncoder(vlessResponse, codecVlessResponseHeader))
 					.pipeTo(opened.writable).catch((err) => {
@@ -213,19 +224,77 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 
 				websocketStream.closed.finally(async () => {
 					mux.terminate(true);
+					console.log(`[Portal] portal left, ${sharedContext.countPortal} available.`);
 				});
+	
+				sharedContext.addPortal(mux);
+				console.log(`[Portal] new portal joined, ${sharedContext.countPortal} available.`);
+			} else if (vlessRequest.instruction == InstructionType.TCP || vlessRequest.instruction == InstructionType.UDP) {
+				// Normal proxy
+
+				const mux = sharedContext.findPortal();
+				if (mux == null) {
+					websocketStream.close();
+					return;
+				}
+
+				let vlessResponse: VlessResponseHeader | null = {
+					version: vlessRequest.version,
+					info: new Uint8Array(0),
+				};
+
+				let dest: muxcool.MuxcoolConnectionInfo | null = {
+					networkType: vlessRequest.instruction as unknown as muxcool.NetworkType,
+					address: vlessRequest.address,
+					port: vlessRequest.port,
+				}
+				const requestProcessor = new TransformStream<Uint8Array, fairmux.Datagram>({
+					start: (controller) => { // Process the first data chunk
+						controller.enqueue({ info: dest, data: chunk });
+						if (vlessRequest.instruction == InstructionType.TCP) {
+							// For TCP, include the destination only in the first muxcool frame (SUB_LINK_NEW)
+							dest = null;
+						}
+					},
+					transform: (chunk, controller) => {
+						controller.enqueue({ info: dest, data: chunk });
+					},
+				});
+				remoteTrafficSink = requestProcessor.writable;
+
+				const responseProcessor = new TransformStream<fairmux.Datagram, Uint8Array>({
+					transform: (chunk, controller) => {
+						if (vlessResponse) {
+							const bufferSize = codecVlessResponseHeader.byteLength(vlessResponse) + chunk.data.byteLength;
+							const buffer = new Uint8Array(bufferSize);
+							const ctx = new codec.CodecContext(buffer);
+							codecVlessResponseHeader.write(vlessResponse, ctx);
+							ctx.push(chunk.data);
+							controller.enqueue(buffer);
+							vlessResponse = null;
+						} else {
+							controller.enqueue(chunk.data);
+						}
+					}
+				});
+				responseProcessor.readable.pipeTo(opened.writable).catch((err) => {
+					console.log(err);
+				});
+
+				mux.addInput(requestProcessor.readable, responseProcessor.writable);
 			}
+
 		},
 	} as UnderlyingSink<Uint8Array>);
 
 	opened.readable.pipeThrough(vlessRequestProcessor)
-		.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-			transform(chunk, controller) {
-				console.log(`From vless client: ${chunk.byteLength} bytes.`)
-				utils.hexdump(chunk);
-				controller.enqueue(chunk);
-			},
-		}))
+		// .pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+		// 	transform(chunk, controller) {
+		// 		console.log(`From vless client: ${chunk.byteLength} bytes.`)
+		// 		utils.hexdump(chunk);
+		// 		controller.enqueue(chunk);
+		// 	},
+		// }))
 		.pipeTo(vlessRequestHandler);
 }
 
