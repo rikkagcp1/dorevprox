@@ -3,6 +3,37 @@ import * as vless from "./vless"
 import * as utils from "./utils"
 import * as wsstream from "./wsstream"
 
+export function populateStatPage(portalLoad: number[]): string {
+	const now = new Date().toISOString();
+
+	const loads = (portalLoad ?? []).map(n =>
+		Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0
+	);
+
+	const portalCount = loads.length;
+	const totalConnections = loads.reduce((s, n) => s + n, 0);
+
+	const lines: string[] = [];
+	lines.push("Portal Status");
+	lines.push("==============");
+	lines.push(`Portals: ${portalCount}`);
+	lines.push(`Total connections: ${totalConnections}`);
+	lines.push(`Generated at: ${now}`);
+	lines.push("");
+
+	if (portalCount === 0) {
+		lines.push("No portals found.");
+	} else {
+		lines.push("Per-portal load:");
+		loads.forEach((cnt, idx) => {
+			lines.push(`- Portal #${idx + 1}: ${cnt} connection${cnt === 1 ? "" : "s"}`);
+		});
+	}
+
+	return lines.join("\n");
+}
+
+
 /**
  * Welcome to Cloudflare Workers! This is your first Durable Objects application.
  *
@@ -17,13 +48,20 @@ import * as wsstream from "./wsstream"
  */
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		const url = new URL(request.url);
 		const upgradeHeader = request.headers.get('Upgrade');
-		if (request.method === 'GET' && upgradeHeader && upgradeHeader === 'websocket') {
-			// Since we are hard coding the Durable Object ID by providing the constant name 'foo',
-			// all requests to this Worker will be sent to the same Durable Object instance.
-			const durableObj = env.WEBSOCKET_HIBERNATION_SERVER.getByName("foo");
+		if (request.method === 'GET') {
+			if (upgradeHeader && upgradeHeader === 'websocket') {
+				// Since we are hard coding the Durable Object ID by providing the constant name 'foo',
+				// all requests to this Worker will be sent to the same Durable Object instance.
+				const durableObj = env.WEBSOCKET_HIBERNATION_SERVER.getByName("foo");
 
-			return durableObj.fetch(request);
+				return durableObj.fetch(request);
+			} else if (url.pathname === "/stats") {
+				const durableObj = env.WEBSOCKET_HIBERNATION_SERVER.getByName("foo");
+
+				return durableObj.statPage();
+			}
 		}
 
 		return new Response(
@@ -74,6 +112,11 @@ export class WebSocketHibernationServer extends DurableObject {
 
 		// Sets an application level auto response that does not wake hibernated WebSockets.
 		// this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
+	}
+
+	statPage() {
+		const portalLoad = this.vlessSharedContext.getPortalLoad();
+		return new Response(populateStatPage(portalLoad));
 	}
 
 	async fetch(request: Request): Promise<Response> {

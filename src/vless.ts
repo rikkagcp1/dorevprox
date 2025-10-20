@@ -157,16 +157,24 @@ export class SharedContext {
 		this.portals.push(portal);
 	}
 
+	/**
+	 * @returns a portal with least number of sublinks
+	 */
 	findPortal(): fairmux.FairMux | null {
+		let candidate: fairmux.FairMux | null = null;
 		for (const portal of this.portals) {
-			if (portal.count < 100)
-				return portal;
+			if (!candidate || candidate.count > portal.count)
+				candidate = portal;
 		}
-		return null;
+		return candidate;
 	}
 
 	get countPortal() {
 		return this.portals.length;
+	}
+
+	getPortalLoad() {
+		return this.portals.map((portal) => portal.count);
 	}
 }
 
@@ -234,6 +242,7 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 
 				const mux = sharedContext.findPortal();
 				if (mux == null) {
+					console.error("[Portal] no portal available");
 					websocketStream.close();
 					return;
 				}
