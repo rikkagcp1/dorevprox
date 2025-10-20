@@ -1,28 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import * as vless from "./vless"
-import * as codec from "./codec"
-import * as fairmux from "./fairmux"
 import * as utils from "./utils"
 import * as wsstream from "./wsstream"
-
-function codecOfRandomProtoBufString(length: number): codec.Codec<Uint8Array> {
-	return {
-		byteLength: () => 3 + length,
-		write: (val, context) => {
-			context.push(0x9a);
-			context.push(0x06);
-			context.push(length);
-			for (let i = 0; i < length; i++) {
-				context.push(Math.floor(Math.random() * 256));
-			}
-		},
-		read: (context) => {
-			// Are you losing your mind?
-			throw new Error("Does not support decoding!");
-		},
-	};
-}
-
 
 /**
  * Welcome to Cloudflare Workers! This is your first Durable Objects application.
@@ -38,7 +17,6 @@ function codecOfRandomProtoBufString(length: number): codec.Codec<Uint8Array> {
  */
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-		const url = new URL(request.url);
 		const upgradeHeader = request.headers.get('Upgrade');
 		if (request.method === 'GET' && upgradeHeader && upgradeHeader === 'websocket') {
 			// Since we are hard coding the Durable Object ID by providing the constant name 'foo',
@@ -72,8 +50,7 @@ export class WebSocketHibernationServer extends DurableObject {
 	// Keeps track of all WebSocket connections
 	// When the DO hibernates, gets reconstructed in the constructor
 	sessions: Map<WebSocket, WebSocketConnection>;
-
-	outlets: fairmux.FairMux[] = [];
+	vlessSharedContext: vless.SharedContext = vless.defaultSharedContext();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -127,12 +104,11 @@ export class WebSocketHibernationServer extends DurableObject {
 			return new Response(null, { status: 500 });
 		}
 
-		let onWsNormalClose: (closeInfo: wsstream.WebSocketCloseInfoLike) => void;
-		let onWsUncleanClose: (closeInfo: wsstream.WebSocketCloseInfoLike) => void;
-		const closedPromise = new Promise<wsstream.WebSocketCloseInfoLike>((resolve, reject) => {
-			onWsNormalClose = resolve;
-			onWsUncleanClose = reject;
-		});
+		const {
+			resolve: onWsNormalClose,
+			reject: onWsUncleanClose,
+			promise: closedPromise,
+		} = utils.newPromiseWithHandle<wsstream.WebSocketCloseInfoLike>();
 
 		const readable = new ReadableStream<Uint8Array>({
 			start: (controller) => {
@@ -146,12 +122,9 @@ export class WebSocketHibernationServer extends DurableObject {
 					onWsUncleanClose,
 				}
 				// Add the WebSocket connection to the map of active sessions.
-				closedPromise.then((closeInfo) => {
+				closedPromise.finally(() => {
 					controller.close();
-					console.log(`Closed: ${JSON.stringify(closeInfo)}`);
-				});
-				closedPromise.catch(() => {
-					controller.error(new Error("WebSocket error"));
+					console.debug(`[WebSocketStream] closed`);
 				});
 				this.sessions.set(server, WebSocketConnection);
 			},
@@ -180,7 +153,7 @@ export class WebSocketHibernationServer extends DurableObject {
 			close: ({ code, reason }: wsstream.WebSocketCloseInfoLike = {}) => server.close(code, reason)
 		};
 
-		await vless.handleVlessRequest(websocketStream);
+		await vless.handleVlessRequest(websocketStream, this.vlessSharedContext);
 
 		return new Response(null, {
 			status: 101,

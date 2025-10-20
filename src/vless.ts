@@ -66,8 +66,10 @@ function checkUUID(uuid: Uint8Array) {
 }
 
 function createTestSource(dest: muxcool.MuxcoolConnectionInfo | null, interval: number, count?: number) {
+	let taskId = NaN;
 	return new ReadableStream<fairmux.Datagram>({
 		start(controller) {
+			console.log("[TestSource] started");
 			const sendDatagram = () => {
 				const length = utils.randomInt(3, 10);
 				const chunk = new Uint8Array(length);
@@ -86,9 +88,14 @@ function createTestSource(dest: muxcool.MuxcoolConnectionInfo | null, interval: 
 					}
 				}
 
-				setTimeout(sendDatagram, interval);
+				taskId = setTimeout(sendDatagram, interval);
 			}
 			sendDatagram();
+		},
+		cancel(reason) {
+			console.log("[TestSource] stopped");
+			if (!Number.isNaN(taskId))
+				clearInterval(taskId);
 		},
 	});
 }
@@ -103,8 +110,10 @@ function createDummySink(prefix = "") {
 }
 
 function createMasterKeepalive(): ReadableStream<fairmux.Datagram> {
+	let taskId = NaN;
 	return new ReadableStream({
 		start(controller) {
+			console.log("[Master keepalive] started");
 			const keepAlive = (dest?: muxcool.MuxcoolConnectionInfo) => {
 				const length = utils.randomInt(4, 100);
 				const chunk = new Uint8Array(3 + length);
@@ -120,7 +129,7 @@ function createMasterKeepalive(): ReadableStream<fairmux.Datagram> {
 					data: chunk,
 				});
 				// console.log(`Keep alive sent to outlet ${length}`);
-				setTimeout(keepAlive, 5000);
+				taskId = setTimeout(keepAlive, 5000);
 			}
 
 			// First packet
@@ -133,10 +142,25 @@ function createMasterKeepalive(): ReadableStream<fairmux.Datagram> {
 				port: 0
 			});
 		},
+		cancel(reason) {
+			console.log("[Master keepalive] stopped");
+			if (!Number.isNaN(taskId))
+				clearInterval(taskId);
+		},
 	});
 }
 
-export async function handleVlessRequest(websocketStream: wsstream.WebSocketStreamLike) {
+export interface SharedContext {
+	portals: fairmux.FairMux[];
+}
+
+export function defaultSharedContext(): SharedContext {
+	return {
+		portals: []
+	}
+}
+
+export async function handleVlessRequest(websocketStream: wsstream.WebSocketStreamLike, context: SharedContext) {
 	const opened = await websocketStream.opened;
 	const { parser: vlessRequestProcessor, vlessHeaderPromise: vlessRequestPromise } = makeVlessHeaderProcessor();
 
@@ -176,7 +200,7 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 						addrType: address.AddrType.DomainName,
 					},
 					port: 2323
-				}, 2000), createDummySink());
+				}, 2000, 5), createDummySink());
 
 				mux.out.pipeThrough(muxcool.newMuxcollFrameEncoder(vlessResponse, codecVlessResponseHeader))
 					.pipeTo(opened.writable).catch((err) => {
@@ -186,6 +210,10 @@ export async function handleVlessRequest(websocketStream: wsstream.WebSocketStre
 				const muxcoolFrameDecoder = muxcool.newMuxcoolFrameDecoder();
 				remoteTrafficSink = muxcoolFrameDecoder.writable;
 				muxcoolFrameDecoder.readable.pipeTo(mux.in);
+
+				websocketStream.closed.finally(async () => {
+					mux.terminate(true);
+				});
 			}
 		},
 	} as UnderlyingSink<Uint8Array>);
