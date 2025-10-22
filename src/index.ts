@@ -33,6 +33,11 @@ export function populateStatPage(portalLoad: number[]): string {
 	return lines.join("\n");
 }
 
+function getDOFromWorkerEnv(env: Env) {
+	// Since we are hard coding the Durable Object ID by providing the constant name 'foo',
+	// all requests to this Worker will be sent to the same Durable Object instance.
+	return env.WEBSOCKET_HIBERNATION_SERVER.getByName("foo");
+}
 
 /**
  * Welcome to Cloudflare Workers! This is your first Durable Objects application.
@@ -52,15 +57,13 @@ export default {
 		const upgradeHeader = request.headers.get('Upgrade');
 		if (request.method === 'GET') {
 			if (upgradeHeader && upgradeHeader === 'websocket') {
-				// Since we are hard coding the Durable Object ID by providing the constant name 'foo',
-				// all requests to this Worker will be sent to the same Durable Object instance.
-				const durableObj = env.WEBSOCKET_HIBERNATION_SERVER.getByName("foo");
-
-				return durableObj.fetch(request);
+				return getDOFromWorkerEnv(env).fetch(request);
 			} else if (url.pathname === "/stats") {
-				const durableObj = env.WEBSOCKET_HIBERNATION_SERVER.getByName("foo");
-
-				return durableObj.statPage();
+				return getDOFromWorkerEnv(env).statPage();
+			} else if (url.pathname === "/doip") {
+				return getDOFromWorkerEnv(env).fetchIfconfigCo();
+			} else if (url.pathname === "/workerip") {
+				return fetch("https://ifconfig.co");
 			}
 		}
 
@@ -124,6 +127,10 @@ export class WebSocketHibernationServer extends DurableObject {
 	statPage() {
 		const portalLoad = this.vlessSharedContext.getPortalLoad();
 		return new Response(populateStatPage(portalLoad));
+	}
+
+	async fetchIfconfigCo() {
+		return fetch("https://ifconfig.co")
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -196,7 +203,7 @@ export class WebSocketHibernationServer extends DurableObject {
 			writable,
 		};
 
-		const websocketStream:wsstream.WebSocketStreamLike = {
+		const websocketStream: wsstream.WebSocketStreamLike = {
 			url: request.url,
 			opened: Promise.resolve(openInfo),
 			closed: closedPromise,
