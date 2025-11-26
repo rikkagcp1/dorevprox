@@ -168,7 +168,7 @@ export class BridgeContext {
 	}
 }
 
-export async function handlelessRequest(lessStream: DuplexStream, sharedContext: BridgeContext, log: utils.Logger, config: GlobalConfig) {
+export function handlelessRequest(lessStream: DuplexStream, sharedContext: BridgeContext | null, log: utils.Logger, config: GlobalConfig) {
 	const { parser: lessRequestProcessor, lessHeaderPromise: lessRequestPromise } = makeLessHeaderProcessor();
 
 	let remoteTrafficSink: WritableStream<Uint8Array> | null = null;
@@ -191,6 +191,12 @@ export async function handlelessRequest(lessStream: DuplexStream, sharedContext:
 				lessRequest.address.addrType == address.AddrType.DomainName &&
 				lessRequest.address.addr === config.portalDomainName) {
 				// Reversed proxy
+
+				if (!sharedContext) {
+					log("error", "less/bridge", "No in-memory state, cannot support bridge!");
+					lessStream.close();
+					return;
+				}
 
 				// Check uuid
 				if (config.checkUuid(lessRequest.uuid) !== UUIDUsage.PORTAL_JOIN) {
@@ -294,6 +300,12 @@ export async function handlelessRequest(lessStream: DuplexStream, sharedContext:
 				}
 
 				// Handle Client->Portal
+				if (!sharedContext) {
+					log("error", "less/bridge", "No in-memory state, cannot support bridge!");
+					lessStream.close();
+					return;
+				}
+
 				const mux = sharedContext.findPortal();
 				if (mux == null) {
 					console.error("[Portal] no portal available");

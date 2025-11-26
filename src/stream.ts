@@ -1,4 +1,5 @@
 import { WebSocketStreamLike } from "./wsstream";
+import { Logger, newPromiseWithHandle, safeCloseWebSocket } from "./utils";
 import { connect } from "cloudflare:sockets";
 
 /**
@@ -33,6 +34,91 @@ export async function DuplexStreamFromWsStream(websocketStream: WebSocketStreamL
 		closed: websocketStream.closed,
 		close: websocketStream.close,
 	};
+}
+
+export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, log: Logger): DuplexStream {
+	let readableStreamCancel = false;
+
+	const {
+		resolve: onWsNormalClose,
+		reject: onWsUncleanClose,
+		promise: closedPromise,
+	} = newPromiseWithHandle();
+
+	const readable = new ReadableStream<Uint8Array>({
+		start(controller) {
+			if (earlyData && earlyData.byteLength > 0) {
+				controller.enqueue(earlyData);
+			}
+			
+			webSocket.addEventListener('message', (event) => {
+				if (readableStreamCancel) {
+					return;
+				}
+
+				// Make sure that we use Uint8Array through out the process.
+				// On Nodejs, event.data can be a Buffer or an ArrayBuffer
+				// On Cloudflare Workers, event.data tend to be an ArrayBuffer
+				controller.enqueue(new Uint8Array(event.data));
+			});
+
+			// The event means that the client closed the client -> server stream.
+			// However, the server -> client stream is still open until you call close() on the server side.
+			// The WebSocket protocol says that a separate close message must be sent in each direction to fully close the socket.
+			webSocket.addEventListener('close', () => {
+				onWsNormalClose();
+
+				// client send close, need close server
+				// if stream is cancel, skip controller.close
+				safeCloseWebSocket(webSocket);
+				if (readableStreamCancel) {
+					return;
+				}
+				controller.close();
+			});
+
+			webSocket.addEventListener('error', (err) => {
+				log("error", "WS", 'webSocketServer has error: ' + err.message);
+				onWsUncleanClose();
+				controller.error(err);
+			});
+		},
+		pull(controller) {
+			// if ws can stop read if stream is full, we can implement backpressure
+			// https://streams.spec.whatwg.org/#example-rs-push-backpressure
+		},
+		cancel(reason) {
+			// 1. pipe WritableStream has error, this cancel will called, so ws handle server close into here
+			// 2. if readableStream is cancel, all controller.close/enqueue need skip,
+			// 3. but from testing controller.error still work even if readableStream is cancel
+			if (readableStreamCancel) {
+				return;
+			}
+			log("error", "WS", `ReadableStream was canceled, due to ${reason}`)
+			readableStreamCancel = true;
+			safeCloseWebSocket(webSocket);
+		}
+	});
+
+	const writable = new WritableStream<Uint8Array>({
+		write: (chunk) => webSocket.send(chunk),
+		close: () => {
+			// The server dont need to close the websocket first, as it will cause ERR_CONTENT_LENGTH_MISMATCH
+			// The client will close the connection anyway.
+			// TODO: Setup a timer to close the websocket after 10 seconds.
+			log("info", "WS", "writable close()");
+			// server.close()
+		},
+	});
+
+	return {
+		readable,
+		writable,
+		close: () => {
+			webSocket.close();
+		},
+		closed: closedPromise,
+	}
 }
 
 export async function DuplexStreamOfTcp(hostname: string, port: number) : Promise<DuplexStream> {

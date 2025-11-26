@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import * as less from "./less"
 import * as utils from "./utils"
 import * as wsstream from "./wsstream"
-import { DuplexStreamFromWsStream } from "./stream"
+import { DuplexStreamFromWsStream, DuplexStreamFromWs } from "./stream"
 import { GlobalConfig, UUIDUsage } from "./config"
 
 const durableObjEndpoint = "/do";
@@ -89,9 +89,36 @@ export default {
 
 		switch (request.method) {
 			case "GET":
-				switch (url.pathname) {
-					case "/ip":
-						return fetch("https://ifconfig.co");
+				const upgradeHeader = request.headers.get('Upgrade');
+				if (upgradeHeader && upgradeHeader === 'websocket') {
+					const webSocketPair = new WebSocketPair();
+					const [client, server] = Object.values(webSocketPair);
+
+					const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+					const earlyDataParseResult = utils.base64ToUint8Array(earlyDataHeader);
+					if (!earlyDataParseResult.success) {
+						return new Response(null, { status: 500 });
+					}
+
+					server.accept();
+
+					const uuid = crypto.randomUUID();
+					const logPrefix = uuid.substring(0, 6);
+					const logger = utils.createLogger(logPrefix);
+					const globalConfig = parseEnv(env);
+
+					const lessStream = DuplexStreamFromWs(server, earlyDataParseResult.data, logger);
+					less.handlelessRequest(lessStream, null, logger, globalConfig);
+
+					return new Response(null, {
+						status: 101,
+						webSocket: client,
+					});
+				} else {
+					switch (url.pathname) {
+						case "/ip":
+							return fetch("https://ifconfig.co");
+					}
 				}
 		}
 
@@ -257,7 +284,7 @@ export class WebSocketHibernationServer extends DurableObject {
 		};
 
 		const lessStream = await DuplexStreamFromWsStream(websocketStream);
-		await less.handlelessRequest(lessStream, this.bridgeContext, logger, this.globalConfig);
+		less.handlelessRequest(lessStream, this.bridgeContext, logger, this.globalConfig);
 
 		return new Response(null, {
 			status: 101,

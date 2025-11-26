@@ -242,3 +242,16 @@ export function equalUint8Array(a: Uint8Array, b: Uint8Array): boolean {
 	}
 	return true;
 }
+
+export function safeCloseWebSocket(webSocket: WebSocket) {
+	const WS_READY_STATE_OPEN = 1;
+	const WS_READY_STATE_CLOSING = 2;
+
+	try {
+		if (webSocket.readyState === WS_READY_STATE_OPEN || webSocket.readyState === WS_READY_STATE_CLOSING) {
+			webSocket.close();
+		}
+	} catch (error) {
+		console.error('safeCloseWebSocket error', error);
+	}
+}
