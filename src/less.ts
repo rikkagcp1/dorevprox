@@ -5,6 +5,7 @@ import * as utils from "./utils"
 import * as fairmux from "./fairmux"
 import * as muxcool from "./muxcool";
 import { GlobalConfig, UUIDUsage } from "./config";
+import { handleOutBound } from "./outbound";
 
 export const enum InstructionType {
 	TCP = 1,
@@ -12,38 +13,38 @@ export const enum InstructionType {
 	MUX = 3,
 };
 
-export interface VlessRequestHeaderPart1 {
+export interface LessRequestHeaderPart1 {
 	version: number;
 	uuid: Uint8Array;
 }
 
-export interface VlessRequestHeaderPart2 {
+export interface LessRequestHeaderPart2 {
 	info: Uint8Array; // A ProtoBuf, not used here
 	instruction: InstructionType;
 	port: number;
 	address: address.Address;
 }
 
-export interface VlessRequestHeader extends VlessRequestHeaderPart1, VlessRequestHeaderPart2 { }
+export interface LessRequestHeader extends LessRequestHeaderPart1, LessRequestHeaderPart2 { }
 
-export const codecVlessRequestHeaderPart1 = codec.codecOf<VlessRequestHeader>(
+export const codecLessRequestHeaderPart1 = codec.codecOf<LessRequestHeader>(
 	{ key: "version", codec: codec.codecU8 },
 	{ key: "uuid", codec: codec.codecOfFixedLenU8Array(16) },
 );
 
-export const codecVlessRequestHeaderPart2 = codec.codecOf<VlessRequestHeader>(
+export const codecLessRequestHeaderPart2 = codec.codecOf<LessRequestHeader>(
 	{ key: "info", codec: codec.codecU8SizedBytes },
 	{ key: "instruction", codec: codec.codecU8 },
 	{ key: "port", codec: codec.codecU16BE },
 	{ key: "address", codec: address.codec_address },
 );
 
-export interface VlessResponseHeader {
+export interface LessResponseHeader {
 	version: number;
 	info: Uint8Array; // A ProtoBuf, not used here
 }
 
-export const codecVlessResponseHeader = codec.codecOf<VlessResponseHeader>(
+export const codecLessResponseHeader = codec.codecOf<LessResponseHeader>(
 	{ key: "version", codec: codec.codecU8 },
 	{ key: "info", codec: codec.codecU8SizedBytes },
 );
@@ -96,7 +97,7 @@ function createMasterKeepalive(internalDomain: string, log: utils.Logger): Reada
 	let taskId = NaN;
 	return new ReadableStream({
 		start(controller) {
-			log("debug", "vless/bridge", "Master keepalive started");
+			log("debug", "less/bridge", "Master keepalive started");
 			const keepAlive = (dest?: muxcool.MuxcoolConnectionInfo) => {
 				const length = utils.randomInt(4, 100);
 				const chunk = new Uint8Array(3 + length);
@@ -126,7 +127,7 @@ function createMasterKeepalive(internalDomain: string, log: utils.Logger): Reada
 			});
 		},
 		cancel(reason) {
-			log("debug", "vless/bridge", "Master keepalive stopped");
+			log("debug", "less/bridge", "Master keepalive stopped");
 			if (!Number.isNaN(taskId))
 				clearInterval(taskId);
 		},
@@ -167,18 +168,18 @@ export class BridgeContext {
 	}
 }
 
-export async function handleVlessRequest(vlessStream: DuplexStream, sharedContext: BridgeContext, log: utils.Logger, config: GlobalConfig) {
-	const { parser: vlessRequestProcessor, vlessHeaderPromise: vlessRequestPromise } = makeVlessHeaderProcessor();
+export async function handlelessRequest(lessStream: DuplexStream, sharedContext: BridgeContext, log: utils.Logger, config: GlobalConfig) {
+	const { parser: lessRequestProcessor, lessHeaderPromise: lessRequestPromise } = makeLessHeaderProcessor();
 
 	let remoteTrafficSink: WritableStream<Uint8Array> | null = null;
-	const vlessRequestHandler = new WritableStream({
+	const lessRequestHandler = new WritableStream({
 		async write(chunk, controller) {
-			const vlessRequest = await vlessRequestPromise;
+			const lessRequest = await lessRequestPromise;
 
 			if (remoteTrafficSink && chunk.byteLength > 0) {
 				// After we parse the header and send the first chunk to the remote destination
 				// We assume that after the handshake, the stream only contains the original traffic.
-				// log('Send traffic from vless client to remote host');
+				// log('Send traffic from less client to remote host');
 				const writer = remoteTrafficSink.getWriter();
 				await writer.ready;
 				await writer.write(chunk);
@@ -186,22 +187,22 @@ export async function handleVlessRequest(vlessStream: DuplexStream, sharedContex
 				return;
 			}
 
-			if (vlessRequest.instruction == InstructionType.TCP &&
-				vlessRequest.address.addrType == address.AddrType.DomainName &&
-				vlessRequest.address.addr === config.portalDomainName) {
+			if (lessRequest.instruction == InstructionType.TCP &&
+				lessRequest.address.addrType == address.AddrType.DomainName &&
+				lessRequest.address.addr === config.portalDomainName) {
 				// Reversed proxy
 
 				// Check uuid
-				if (config.checkUuid(vlessRequest.uuid) !== UUIDUsage.PORTAL_JOIN) {
-					log("warn", "vless/bridge", "Portal UUID is invalid!");
-					vlessStream.close();
+				if (config.checkUuid(lessRequest.uuid) !== UUIDUsage.PORTAL_JOIN) {
+					log("warn", "less/bridge", "Portal UUID is invalid!");
+					lessStream.close();
 					return;
 				}
 
 				// Reverse proxy request
 				const mux = new fairmux.FairMux();
-				const vlessResponse: VlessResponseHeader = {
-					version: vlessRequest.version,
+				const lessResponse: LessResponseHeader = {
+					version: lessRequest.version,
 					info: new Uint8Array(0),
 				};
 
@@ -216,8 +217,8 @@ export async function handleVlessRequest(vlessStream: DuplexStream, sharedContex
 				// 	port: 2323
 				// }, 2000, 5), createDummySink());
 
-				mux.out.pipeThrough(muxcool.newMuxcollFrameEncoder(vlessResponse, codecVlessResponseHeader))
-					.pipeTo(vlessStream.writable).catch((err) => {
+				mux.out.pipeThrough(muxcool.newMuxcollFrameEncoder(lessResponse, codecLessResponseHeader))
+					.pipeTo(lessStream.writable).catch((err) => {
 					console.log(err);
 				});
 
@@ -226,43 +227,43 @@ export async function handleVlessRequest(vlessStream: DuplexStream, sharedContex
 				muxcoolFrameDecoder.readable.pipeTo(mux.in);
 
 				const portalRemover = sharedContext.addPortal(mux);
-				vlessStream.closed.finally(async () => {
+				lessStream.closed.finally(async () => {
 					mux.terminate(true);
 					portalRemover();
-					log("info", "vless/bridge", `portal left, ${sharedContext.countPortal} available.`);
+					log("info", "less/bridge", `portal left, ${sharedContext.countPortal} available.`);
 				});
 	
-				log("info", "vless/bridge", `new portal joined, ${sharedContext.countPortal} available.`);
-			} else if (vlessRequest.instruction == InstructionType.TCP || vlessRequest.instruction == InstructionType.UDP) {
+				log("info", "less/bridge", `new portal joined, ${sharedContext.countPortal} available.`);
+			} else if (lessRequest.instruction == InstructionType.TCP || lessRequest.instruction == InstructionType.UDP) {
 				// Normal proxy
 
 				// Check uuid
-				const uuidUsage = config.checkUuid(vlessRequest.uuid);
+				const uuidUsage = config.checkUuid(lessRequest.uuid);
 				if (uuidUsage === UUIDUsage.INVALID || uuidUsage === UUIDUsage.PORTAL_JOIN) {
-					log("warn", "vless", "UUID is invalid");
-					vlessStream.close();
+					log("warn", "less", "UUID is invalid");
+					lessStream.close();
 					return;
 				}
-				const protocolString = vlessRequest.instruction == InstructionType.TCP ? "TCP" : "UDP";
-				log("info", "vless/inbound", `new request to ${protocolString}:${address.addressToString(vlessRequest.address)}:${vlessRequest.port}`);
+				const protocolString = lessRequest.instruction == InstructionType.TCP ? "TCP" : "UDP";
+				log("info", "less/inbound", `new request to ${protocolString}:${address.addressToString(lessRequest.address)}:${lessRequest.port}`);
 
-				let vlessResponse: VlessResponseHeader | null = {
-					version: vlessRequest.version,
+				let lessResponse: LessResponseHeader | null = {
+					version: lessRequest.version,
 					info: new Uint8Array(0),
 				};
 
-				function vlessResponsePrepender<T>(chunkDataGetter: (chunkIn: T) => Uint8Array) {
+				function lessResponsePrepender<T>(chunkDataGetter: (chunkIn: T) => Uint8Array) {
 					return new TransformStream<T, Uint8Array>({
 						transform: (chunk, controller) => {
 							const u8Chunk = chunkDataGetter(chunk);
-							if (vlessResponse) {
-								const bufferSize = codecVlessResponseHeader.byteLength(vlessResponse) + u8Chunk.byteLength;
+							if (lessResponse) {
+								const bufferSize = codecLessResponseHeader.byteLength(lessResponse) + u8Chunk.byteLength;
 								const buffer = new Uint8Array(bufferSize);
 								const ctx = new codec.CodecContext(buffer);
-								codecVlessResponseHeader.write(vlessResponse, ctx);
+								codecLessResponseHeader.write(lessResponse, ctx);
 								ctx.push(u8Chunk);
 								controller.enqueue(buffer);
-								vlessResponse = null;
+								lessResponse = null;
 							} else {
 								controller.enqueue(u8Chunk);
 							}
@@ -272,26 +273,43 @@ export async function handleVlessRequest(vlessStream: DuplexStream, sharedContex
 
 				if (uuidUsage === UUIDUsage.TO_FREEDOM) {
 					// Handle Client->Freedom
-					throw new Error("Not implemented!");
+
+					const {
+						readable,
+						writable,
+					} = await handleOutBound(
+						{
+							isUDP: !(lessRequest.instruction === InstructionType.TCP),
+							port: lessRequest.port,
+							address: lessRequest.address,
+							firstChunk: chunk,
+						},
+						config,
+						log,
+						lessStream.close
+					);
+					remoteTrafficSink = writable;
+					readable.pipeThrough(lessResponsePrepender(chunkIn => chunkIn)).pipeTo(lessStream.writable);
+					return;
 				}
 
 				// Handle Client->Portal
 				const mux = sharedContext.findPortal();
 				if (mux == null) {
 					console.error("[Portal] no portal available");
-					vlessStream.close();
+					lessStream.close();
 					return;
 				}
 
 				let dest: muxcool.MuxcoolConnectionInfo | null = {
-					networkType: vlessRequest.instruction as unknown as muxcool.NetworkType,
-					address: vlessRequest.address,
-					port: vlessRequest.port,
+					networkType: lessRequest.instruction as unknown as muxcool.NetworkType,
+					address: lessRequest.address,
+					port: lessRequest.port,
 				}
 				const requestProcessor = new TransformStream<Uint8Array, fairmux.Datagram>({
 					start: (controller) => { // Process the first data chunk
 						controller.enqueue({ info: dest, data: chunk });
-						if (vlessRequest.instruction == InstructionType.TCP) {
+						if (lessRequest.instruction == InstructionType.TCP) {
 							// For TCP, include the destination only in the first muxcool frame (SUB_LINK_NEW)
 							dest = null;
 						}
@@ -302,8 +320,8 @@ export async function handleVlessRequest(vlessStream: DuplexStream, sharedContex
 				});
 				remoteTrafficSink = requestProcessor.writable;
 	
-				const responseProcessor = vlessResponsePrepender<fairmux.Datagram>(chunkIn => chunkIn.data);
-				responseProcessor.readable.pipeTo(vlessStream.writable).catch((err) => {
+				const responseProcessor = lessResponsePrepender<fairmux.Datagram>(chunkIn => chunkIn.data);
+				responseProcessor.readable.pipeTo(lessStream.writable).catch((err) => {
 					console.log(err);
 				});
 
@@ -313,40 +331,39 @@ export async function handleVlessRequest(vlessStream: DuplexStream, sharedContex
 		},
 	} as UnderlyingSink<Uint8Array>);
 
-	vlessStream.readable.pipeThrough(vlessRequestProcessor)
+	lessStream.readable.pipeThrough(lessRequestProcessor)
 		// .pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
 		// 	transform(chunk, controller) {
-		// 		console.log(`From vless client: ${chunk.byteLength} bytes.`)
+		// 		console.log(`From less client: ${chunk.byteLength} bytes.`)
 		// 		utils.hexdump(chunk);
 		// 		controller.enqueue(chunk);
 		// 	},
 		// }))
-		.pipeTo(vlessRequestHandler);
+		.pipeTo(lessRequestHandler);
 }
 
-function makeVlessHeaderProcessor() {
-	let part1Decoder: codec.IncrementalDeserializer<VlessRequestHeaderPart1> | null
-		= codec.createIncrementalDeserializer(codecVlessRequestHeaderPart1);
-	let part2Decoder: codec.IncrementalDeserializer<VlessRequestHeaderPart2> | null = null;
-	let vlessRequestHeaderPart1: VlessRequestHeaderPart1 | null = null;
-	let vlessRequestHeader: VlessRequestHeader | null = null;
+function makeLessHeaderProcessor() {
+	let part1Decoder: codec.IncrementalDeserializer<LessRequestHeaderPart1> | null
+		= codec.createIncrementalDeserializer(codecLessRequestHeaderPart1);
+	let part2Decoder: codec.IncrementalDeserializer<LessRequestHeaderPart2> | null = null;
+	let lessRequestHeaderPart1: LessRequestHeaderPart1 | null = null;
+	let lessRequestHeader: LessRequestHeader | null = null;
 
 	const {
-		resolve: vlessRequestHeaderPromiseResolve,
-		reject: vlessRequestHeaderPromiseReject,
-		promise: vlessHeaderPromise,
-	} = utils.newPromiseWithHandle<VlessRequestHeader>();
+		resolve: lessRequestHeaderPromiseResolve,
+		promise: lessHeaderPromise,
+	} = utils.newPromiseWithHandle<LessRequestHeader>();
 
 	const parser = new TransformStream<Uint8Array, Uint8Array>({
 		transform(chunk, controller) {
 			if (part2Decoder) {
 				const outcome2 = part2Decoder(chunk);
 				if (outcome2.done) {
-					vlessRequestHeader = {
-						...vlessRequestHeaderPart1!,
+					lessRequestHeader = {
+						...lessRequestHeaderPart1!,
 						...outcome2.value,
 					};
-					vlessRequestHeaderPromiseResolve(vlessRequestHeader);
+					lessRequestHeaderPromiseResolve(lessRequestHeader);
 
 					// Here we use a 0-size chunk to kick start
 					controller.enqueue(outcome2.residue);
@@ -355,18 +372,18 @@ function makeVlessHeaderProcessor() {
 			} else if (part1Decoder) {
 				const outcome1 = part1Decoder(chunk);
 				if (outcome1.done) {
-					vlessRequestHeaderPart1 = outcome1.value;
-					part2Decoder = codec.createIncrementalDeserializer(codecVlessRequestHeaderPart2);
+					lessRequestHeaderPart1 = outcome1.value;
+					part2Decoder = codec.createIncrementalDeserializer(codecLessRequestHeaderPart2);
 					part1Decoder = null;
 
 					// Immediately check if we are able to parse part2
 					const outcome2 = part2Decoder(outcome1.residue);
 					if (outcome2.done) {
-						vlessRequestHeader = {
-							...vlessRequestHeaderPart1!,
+						lessRequestHeader = {
+							...lessRequestHeaderPart1!,
 							...outcome2.value,
 						};
-						vlessRequestHeaderPromiseResolve(vlessRequestHeader);
+						lessRequestHeaderPromiseResolve(lessRequestHeader);
 
 						// Here we use a 0-size chunk to kick start
 						controller.enqueue(outcome2.residue);
@@ -380,5 +397,5 @@ function makeVlessHeaderProcessor() {
 		},
 	});
 
-	return { parser, vlessHeaderPromise };
+	return { parser, lessHeaderPromise: lessHeaderPromise };
 }

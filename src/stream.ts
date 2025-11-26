@@ -1,4 +1,5 @@
 import { WebSocketStreamLike } from "./wsstream";
+import { connect } from "cloudflare:sockets";
 
 /**
  * This interface defines a duplex stream that can be considered as
@@ -32,4 +33,11 @@ export async function DuplexStreamFromWsStream(websocketStream: WebSocketStreamL
 		closed: websocketStream.closed,
 		close: websocketStream.close,
 	};
+}
+
+export async function DuplexStreamOfTcp(hostname: string, port: number) : Promise<DuplexStream> {
+	console.log(`tcp://${hostname}:${port}`);
+	const socket = connect({hostname, port});
+	await socket.opened;
+	return socket;
 }

@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import * as vless from "./vless"
+import * as less from "./less"
 import * as utils from "./utils"
 import * as wsstream from "./wsstream"
 import { DuplexStreamFromWsStream } from "./stream"
@@ -94,14 +94,14 @@ export class WebSocketHibernationServer extends DurableObject {
 	// When the DO hibernates, gets reconstructed in the constructor
 	sessions: Map<WebSocket, WebSocketConnection> = new Map();
 	globalConfig: GlobalConfig;
-	bridgeContext = new vless.BridgeContext(); // Tracks the reverse proxy states
+	bridgeContext = new less.BridgeContext(); // Tracks the reverse proxy states
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 
-		const uuid_portal = utils.uuidToUint8Array(env.UUID_PORTAL);
-		const uuid_client = utils.uuidToUint8Array(env.UUID_CLIENT);
-		const uuid_user = utils.uuidToUint8Array(env.UUID);
+		const uuid_portal = utils.uuidToUint8Array(env.UUID_PORTAL, "3bcd5018-a42f-4584-a1db-bc7a3592037a");
+		const uuid_client = utils.uuidToUint8Array(env.UUID_CLIENT, "f4e37f87-9156-4698-bba8-87847d23c83e");
+		const uuid_user = utils.uuidToUint8Array(env.UUID, "f1f8dc41-64d4-4c21-898c-035fe9c55763");
 
 		this.globalConfig = {
 			portalDomainName: "cyka.blayt.su",
@@ -234,8 +234,8 @@ export class WebSocketHibernationServer extends DurableObject {
 			close: ({ code, reason }: wsstream.WebSocketCloseInfoLike = {}) => server.close(code, reason)
 		};
 
-		const vlessStream = await DuplexStreamFromWsStream(websocketStream);
-		await vless.handleVlessRequest(vlessStream, this.bridgeContext, logger, this.globalConfig);
+		const lessStream = await DuplexStreamFromWsStream(websocketStream);
+		await less.handlelessRequest(lessStream, this.bridgeContext, logger, this.globalConfig);
 
 		return new Response(null, {
 			status: 101,

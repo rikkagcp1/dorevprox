@@ -1,0 +1,250 @@
+import { Address, addressToString } from "./address";
+import { DuplexStream, DuplexStreamOfTcp } from "./stream";
+import { GlobalConfig } from "./config";
+import { NumberMap, newNumberMap, childStringOf, childIntOf, uuidToUint8Array, Logger } from "./utils";
+
+interface OutboundRequest {
+	isUDP: boolean,
+	/**
+	 * Remote destionation
+	 */
+	address: Address,
+	port: number,
+	/**
+	 * The first chunk of data send to the remote destionation
+	 */
+	firstChunk: Uint8Array,
+}
+
+interface OutboundContext {
+	log: Logger,
+	newTcp: (host: string, port: number) => Promise<DuplexStream>,
+}
+
+type OutboundProtocol = "freedom" | "forward" | "socks" | "ws";
+
+interface OutboundHandler {
+	protocol: OutboundProtocol;
+	mayDoUDP: (request: OutboundRequest) => boolean;
+	handler: (request: OutboundRequest, context: OutboundContext) => Promise<DuplexStream>;
+}
+
+async function writeChunk(writableStream: WritableStream<Uint8Array>, chunk: Uint8Array) {
+	const writer = writableStream.getWriter();
+	await writer.write(chunk);
+	writer.releaseLock();
+}
+
+async function handleFreedom(request: OutboundRequest, context: OutboundContext, dnsTCPServer: string | null) {
+	const logSource = "less/outbound/freedom";
+
+	let addressString = addressToString(request.address);
+	if (request.isUDP && request.port == 53 && dnsTCPServer != null) {
+		// Forward the UDP DNS request to a TCP DNS server
+		addressString = dnsTCPServer;
+		context.log("info", logSource, `Redirect DNS request to tcp://${addressString}:${request.port}`)
+	} else if (request.isUDP) {
+		// UDP to other port, or dnsTCPServer is not set
+		// TODO: Handle UDP
+		throw new Error("UDP unimplemented!");
+	}
+
+	// Handle TCP
+	const tcpSocket = await context.newTcp(addressString, request.port);
+	tcpSocket.closed.then(() => context.log("info", logSource, "TCP Closed"));
+	tcpSocket.closed.catch(error => context.log("info", logSource, "Tcp socket closed with error: ", error.message));
+	context.log("info", logSource, `Connecting to tcp://${addressString}:${request.port}`);
+	await writeChunk(tcpSocket.writable, request.firstChunk);
+	return tcpSocket;
+}
+
+async function handleForward(request: OutboundRequest, context: OutboundContext, proxyServer: string, portMap: NumberMap | null) {
+	const logSource = "less/outbound/forward";
+
+	let portDest = request.port;
+	if (portMap) {
+		portDest = portMap[request.port];
+
+		if (!portDest) {
+			portDest = request.port;
+		}
+	}
+
+	const tcpSocket = await context.newTcp(proxyServer, portDest);
+	tcpSocket.closed.catch(error => console.log('[forward] tcpSocket closed with error: ', error.message));
+	context.log("info", logSource, `Forwarding tcp://${request.address}:${request.port} to ${proxyServer}:${portDest}`);
+	await writeChunk(tcpSocket.writable, request.firstChunk);
+	return tcpSocket;
+}
+
+async function handleSocks5(request: OutboundRequest, context: OutboundContext, proxyServer: string, proxyPort: number, user: string|null, pass: number) {
+	throw new Error("Not implemented!");
+	return {} as unknown as DuplexStream;
+}
+
+async function handleWs(request: OutboundRequest, context: OutboundContext, proxyServer: string, proxyPort: number, path: string, uuid: Uint8Array) {
+	throw new Error("Not implemented!");
+	return {} as unknown as DuplexStream;
+}
+
+export function parseOutboundConfig(jsonArray: any[]) {
+	const outboundHandlers: OutboundHandler[] = [];
+
+	let i = 0;
+	for (const jsonObject of jsonArray) {
+		if (typeof jsonObject !== "object" || jsonObject === null) {
+			throw new Error(`Invalid config item at index ${i}: not an object`);
+		}
+
+		const protocolString = jsonObject["protocol"];
+		switch (protocolString) {
+			case "freedom": {
+				let dnsTCPServer: string | null = null;
+				try {
+					dnsTCPServer = childStringOf(jsonObject, "dnsTCPServer");
+				} catch {}
+				outboundHandlers.push({
+					protocol: "freedom",
+					mayDoUDP: (request) => {
+						// Check if we should forward UDP DNS requests to a designated TCP DNS server.
+						// The less packing of UDP datagrams is identical to the one used in TCP DNS protocol,
+						// so we can directly send raw less traffic to the TCP DNS server.
+						// TCP DNS requests will not be touched.
+						// If fail to directly reach the TCP DNS server, UDP DNS request will be attempted on the other outbounds
+						// TODO: check platform supports UDP outbound first
+						return request.port == 53 && dnsTCPServer != null;
+					},
+					handler: async (request, context) => handleFreedom (request, context, dnsTCPServer),
+				});
+			} break;
+
+			case "forward": {
+				const portMapObj = jsonObject["portMap"];
+				const portMap: NumberMap | null =
+					(portMapObj && typeof portMapObj === "object") ? newNumberMap(portMapObj) : null;
+				const proxyServer = childStringOf(jsonObject, "address");
+
+				outboundHandlers.push({
+					protocol: "forward",
+					mayDoUDP: () => false,
+					handler: async (request, context) => handleForward(request, context, proxyServer, portMap),
+				});
+			} break;
+
+			case "socks": {
+				const proxyServer = childStringOf(jsonObject, "address");
+				const proxyPort = childIntOf(jsonObject, "port");
+
+				// These are optional
+				let user: string | null = null;
+				try {
+					user = childStringOf(jsonObject, "user");
+				} catch {}
+				const pass = childIntOf(jsonObject, "pass", 0);
+				outboundHandlers.push({
+					protocol: "socks",
+					mayDoUDP: () => false,
+					handler: async (request, context) => handleSocks5(request, context, proxyServer, proxyPort, user, pass),
+				});
+			} break;
+
+			case "ws": {
+				const proxyServer = childStringOf(jsonObject, "address");
+				const proxyPort = childIntOf(jsonObject, "port");
+				const path = childStringOf(jsonObject, "path");
+				const uuidString = childStringOf(jsonObject, "uuid");
+				const uuid = uuidToUint8Array(uuidString);
+				outboundHandlers.push({
+					protocol: "ws",
+					mayDoUDP: () => true,
+					handler: async (request, context) => handleWs(request, context, proxyServer, proxyPort, path, uuid),
+				});
+			} break;
+
+			default:
+				throw new Error(`Invalid protocol "${protocolString}"`);
+		}
+
+		i++;
+	}
+
+	return outboundHandlers;
+}
+
+export async function handleOutBound(request: OutboundRequest, globalConfig: GlobalConfig,
+	log: Logger,
+	disconnect: () => void): Promise<DuplexStream> {
+
+	const outbounds = parseOutboundConfig([
+		{
+			protocol: "freedom",
+			dnsTCPServer: "8.8.4.4",
+		},
+		{
+			protocol: "forward",
+			address: "[2a00:1098:2b::1]",
+			portMap: {
+				80: 80,
+				443: 443,
+			}
+		},
+	]);
+
+	// Try each outbound method until we find a working one.
+	for (const outbound of outbounds) {
+		if (request.isUDP && !outbound.mayDoUDP(request)) {
+			continue; // This outbound method does not support UDP
+		}
+
+		log("debug", "less/outbound", `attemping ${outbound.protocol}`);
+
+		// Wait for this handler to establish a remote connection
+		const toDest = await outbound.handler(request, {
+			log,
+			newTcp: DuplexStreamOfTcp,
+		});
+
+		const remoteReader = toDest.readable.getReader();
+		try {
+			const { done, value: firstChunk } = await remoteReader.read();
+
+			if (done || firstChunk == undefined) {
+				// Normal closure, no data. Likely being actively rejected.
+				remoteReader.releaseLock();
+				continue;
+			}
+
+			// Connection established and the remote replied us something
+			const newReadable = new ReadableStream<Uint8Array>({
+				start(controller) {
+					// Don't forget to send the first chunk
+					controller.enqueue(firstChunk);
+				},
+				async pull(controller) {
+					const { done, value } = await remoteReader.read();
+					if (done) {
+						controller.close();
+					} else {
+						controller.enqueue(value);
+					}
+				},
+				cancel(reason) {
+					return remoteReader.cancel(reason);
+				}
+			});
+
+			log("debug", "less/outbound", `handled by ${outbound.protocol}`);
+			return { 
+				readable: newReadable,
+				writable: toDest.writable,
+				close: toDest.close,
+				closed: toDest.closed,
+			};
+		} catch {
+			try { await remoteReader.cancel("probe error"); } catch {}
+		}
+	}
+
+	disconnect();
+	throw new Error('No more available outbound chain, abort!')
+}

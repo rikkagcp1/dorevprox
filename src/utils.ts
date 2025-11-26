@@ -201,16 +201,24 @@ export function newPromiseWithHandle<T = void>(): {
 	return { resolve, reject, promise };
 }
 
-export function uuidToUint8Array(uuid: string): Uint8Array {
+export function uuidToUint8Array(uuid: string | undefined, defaultValue?: string): Uint8Array {
+	if (uuid === undefined) {
+		if (defaultValue) {
+			uuid = defaultValue;
+		} else {
+			throw new Error("The given UUID string is undefined and there is no default value!");
+		}
+	}
+
 	// Check base format: 8-4-4-4-12, 36 chars in total
 	const uuidRegex = /^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/;
 	if (!uuidRegex.test(uuid)) {
-		throw new Error("Invalid UUID format");
+		throw new Error(`Invalid UUID format: ${uuid}`);
 	}
 
 	const hex = uuid.replace(/-/g, "");
 	if (hex.length !== 32) {
-		throw new Error("Invalid UUID length");
+		throw new Error(`Invalid UUID length: ${hex.length}`);
 	}
 
 	const bytes = new Uint8Array(16);
