@@ -182,7 +182,7 @@ export async function handleOutBound(request: OutboundRequest, globalConfig: Glo
 		},
 		{
 			protocol: "forward",
-			address: "[2a00:1098:2b::1]",
+			address: "[2a00:1098:2b::1:AC43:A86A]",
 			portMap: {
 				80: 80,
 				443: 443,
@@ -198,14 +198,15 @@ export async function handleOutBound(request: OutboundRequest, globalConfig: Glo
 
 		log("debug", "less/outbound", `attemping ${outbound.protocol}`);
 
-		// Wait for this handler to establish a remote connection
-		const toDest = await outbound.handler(request, {
-			log,
-			newTcp: DuplexStreamOfTcp,
-		});
-
-		const remoteReader = toDest.readable.getReader();
 		try {
+			// Wait for this handler to establish a remote connection
+			const toDest = await outbound.handler(request, {
+				log,
+				newTcp: DuplexStreamOfTcp,
+			});
+
+			const remoteReader = toDest.readable.getReader();
+
 			const { done, value: firstChunk } = await remoteReader.read();
 
 			if (done || firstChunk == undefined) {
@@ -240,8 +241,8 @@ export async function handleOutBound(request: OutboundRequest, globalConfig: Glo
 				close: toDest.close,
 				closed: toDest.closed,
 			};
-		} catch {
-			try { await remoteReader.cancel("probe error"); } catch {}
+		} catch(e) {
+			log("debug", `${outbound.protocol} failed with:`, e);
 		}
 	}
 

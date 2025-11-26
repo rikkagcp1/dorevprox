@@ -1,4 +1,4 @@
-import { WebSocketStreamLike } from "./wsstream";
+import { WebSocketStreamLike, WebSocketCloseInfoLike } from "./wsstream";
 import { Logger, newPromiseWithHandle, safeCloseWebSocket } from "./utils";
 import { connect } from "cloudflare:sockets";
 
@@ -43,7 +43,7 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 		resolve: onWsNormalClose,
 		reject: onWsUncleanClose,
 		promise: closedPromise,
-	} = newPromiseWithHandle();
+	} = newPromiseWithHandle<WebSocketCloseInfoLike>();
 
 	const readable = new ReadableStream<Uint8Array>({
 		start(controller) {
@@ -51,7 +51,7 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 				controller.enqueue(earlyData);
 			}
 			
-			webSocket.addEventListener('message', (event) => {
+			webSocket.addEventListener("message", (event) => {
 				if (readableStreamCancel) {
 					return;
 				}
@@ -65,8 +65,8 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			// The event means that the client closed the client -> server stream.
 			// However, the server -> client stream is still open until you call close() on the server side.
 			// The WebSocket protocol says that a separate close message must be sent in each direction to fully close the socket.
-			webSocket.addEventListener('close', () => {
-				onWsNormalClose();
+			webSocket.addEventListener("close", (event) => {
+				onWsNormalClose({code: event.code, reason: event.reason});
 
 				// client send close, need close server
 				// if stream is cancel, skip controller.close
@@ -77,10 +77,9 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 				controller.close();
 			});
 
-			webSocket.addEventListener('error', (err) => {
-				log("error", "WS", 'webSocketServer has error: ' + err.message);
-				onWsUncleanClose();
-				controller.error(err);
+			webSocket.addEventListener("error", (event) => {
+				onWsUncleanClose(event.error);
+				controller.error(event);
 			});
 		},
 		pull(controller) {
@@ -94,7 +93,7 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			if (readableStreamCancel) {
 				return;
 			}
-			log("error", "WS", `ReadableStream was canceled, due to ${reason}`)
+			log("error", "websocket", `ReadableStream was canceled, due to ${reason}`)
 			readableStreamCancel = true;
 			safeCloseWebSocket(webSocket);
 		}
@@ -106,9 +105,17 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			// The server dont need to close the websocket first, as it will cause ERR_CONTENT_LENGTH_MISMATCH
 			// The client will close the connection anyway.
 			// TODO: Setup a timer to close the websocket after 10 seconds.
-			log("info", "WS", "writable close()");
+			log("info", "websocket", "writable close()");
 			// server.close()
 		},
+	});
+
+	closedPromise.then((info) => {
+		log("info", "websocket", `closed normally with code: ${info.code}, reason: ${info.reason}`);
+	});
+
+	closedPromise.catch((error) => {
+		log("error", "websocket", "closed with error:", error);
 	});
 
 	return {
@@ -122,7 +129,6 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 }
 
 export async function DuplexStreamOfTcp(hostname: string, port: number) : Promise<DuplexStream> {
-	console.log(`tcp://${hostname}:${port}`);
 	const socket = connect({hostname, port});
 	await socket.opened;
 	return socket;
