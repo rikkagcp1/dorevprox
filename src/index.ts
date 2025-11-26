@@ -5,6 +5,8 @@ import * as wsstream from "./wsstream"
 import { DuplexStreamFromWsStream } from "./stream"
 import { GlobalConfig, UUIDUsage } from "./config"
 
+const durableObjEndpoint = "/do";
+
 export function populateStatPage(portalLoad: number[]): string {
 	const now = new Date().toISOString();
 
@@ -35,6 +37,29 @@ export function populateStatPage(portalLoad: number[]): string {
 	return lines.join("\n");
 }
 
+function parseEnv(env: Env) : GlobalConfig {
+	const uuid_portal = utils.uuidToUint8Array(env.UUID_PORTAL, "3bcd5018-a42f-4584-a1db-bc7a3592037a");
+	const uuid_client = utils.uuidToUint8Array(env.UUID_CLIENT, "f4e37f87-9156-4698-bba8-87847d23c83e");
+	const uuid_user = utils.uuidToUint8Array(env.UUID, "f1f8dc41-64d4-4c21-898c-035fe9c55763");
+
+	return {
+		portalDomainName: "cyka.blayt.su",
+		bridgeInternalDomain: "reverse",
+		checkUuid: (uuid) => {
+			if (utils.equalUint8Array(uuid, uuid_portal))
+				return UUIDUsage.PORTAL_JOIN;
+
+			if (utils.equalUint8Array(uuid, uuid_client))
+				return UUIDUsage.TO_PORTAL;
+
+			if (utils.equalUint8Array(uuid, uuid_user))
+				return UUIDUsage.TO_FREEDOM;
+
+			return UUIDUsage.INVALID;
+		},
+	};
+}
+
 function getDOFromWorkerEnv(env: Env) {
 	// Since we are hard coding the Durable Object ID by providing the constant name 'foo',
 	// all requests to this Worker will be sent to the same Durable Object instance.
@@ -56,17 +81,18 @@ function getDOFromWorkerEnv(env: Env) {
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
-		const upgradeHeader = request.headers.get('Upgrade');
-		if (request.method === 'GET') {
-			if (upgradeHeader && upgradeHeader === 'websocket') {
-				return getDOFromWorkerEnv(env).fetch(request);
-			} else if (url.pathname === "/stats") {
-				return getDOFromWorkerEnv(env).statPage();
-			} else if (url.pathname === "/doip") {
-				return getDOFromWorkerEnv(env).fetchIfconfigCo();
-			} else if (url.pathname === "/workerip") {
-				return fetch("https://ifconfig.co");
-			}
+
+		if (url.pathname.startsWith(durableObjEndpoint)) {
+			// Let durable object handle the request
+			return getDOFromWorkerEnv(env).fetch(request);
+		}
+
+		switch (request.method) {
+			case "GET":
+				switch (url.pathname) {
+					case "/ip":
+						return fetch("https://ifconfig.co");
+				}
 		}
 
 		return new Response(
@@ -99,26 +125,7 @@ export class WebSocketHibernationServer extends DurableObject {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 
-		const uuid_portal = utils.uuidToUint8Array(env.UUID_PORTAL, "3bcd5018-a42f-4584-a1db-bc7a3592037a");
-		const uuid_client = utils.uuidToUint8Array(env.UUID_CLIENT, "f4e37f87-9156-4698-bba8-87847d23c83e");
-		const uuid_user = utils.uuidToUint8Array(env.UUID, "f1f8dc41-64d4-4c21-898c-035fe9c55763");
-
-		this.globalConfig = {
-			portalDomainName: "cyka.blayt.su",
-			bridgeInternalDomain: "reverse",
-			checkUuid: (uuid) => {
-				if (utils.equalUint8Array(uuid, uuid_portal))
-					return UUIDUsage.PORTAL_JOIN;
-
-				if (utils.equalUint8Array(uuid, uuid_client))
-					return UUIDUsage.TO_PORTAL;
-
-				if (utils.equalUint8Array(uuid, uuid_user))
-					return UUIDUsage.TO_FREEDOM;
-
-				return UUIDUsage.INVALID;
-			},
-		};
+		this.globalConfig = parseEnv(env);
 
 		// As part of constructing the Durable Object,
 		// we wake up any hibernating WebSockets and
@@ -140,16 +147,31 @@ export class WebSocketHibernationServer extends DurableObject {
 		// this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
 	}
 
-	statPage() {
-		const portalLoad = this.bridgeContext.getPortalLoad();
-		return new Response(populateStatPage(portalLoad));
-	}
-
-	async fetchIfconfigCo() {
-		return fetch("https://ifconfig.co")
-	}
-
 	async fetch(request: Request): Promise<Response> {
+		const pathname = (new URL(request.url)).pathname.substring(durableObjEndpoint.length);
+
+		switch (request.method) {
+			case "GET":
+				const upgradeHeader = request.headers.get('Upgrade');
+				if (upgradeHeader && upgradeHeader === 'websocket') {
+					return this.handleWs(request);
+				} else {
+					switch (pathname) {
+						case "/stats":
+							const portalLoad = this.bridgeContext.getPortalLoad();
+							return new Response(populateStatPage(portalLoad));
+						case "/ip":
+							return fetch("https://ifconfig.co");
+					}
+				}
+		}
+
+		return new Response(null, {
+			status: 404,
+		});
+	}
+
+	async handleWs(request: Request): Promise<Response> {
 		// Creates two ends of a WebSocket connection.
 		const webSocketPair = new WebSocketPair();
 		const [client, server] = Object.values(webSocketPair);
