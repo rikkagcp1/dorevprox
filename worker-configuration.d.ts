@@ -9,6 +9,7 @@ declare namespace Cloudflare {
 	interface Env {
 		UUID_PORTAL: string;
 		UUID_CLIENT: string;
+		UUID: string;
 		WEBSOCKET_HIBERNATION_SERVER: DurableObjectNamespace<import("./src/index").WebSocketHibernationServer>;
 	}
 }

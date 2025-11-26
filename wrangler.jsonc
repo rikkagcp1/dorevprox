@@ -4,9 +4,16 @@
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "dotest",
+	"name": "dorevprox",
 	"main": "src/index.ts",
-	"compatibility_date": "2025-10-11",
+	"compatibility_date": "2025-11-17",
+	"workers_dev": true,
+	"routes": [
+		{
+			"pattern": "dorevprox.1.1.8.f.5.a.2.8.f.0.7.4.0.1.0.0.2.ip6.arpa",
+			"custom_domain": true
+		}
+	],
 	"migrations": [
 		{
 			"new_sqlite_classes": [

@@ -2,6 +2,8 @@ import { DurableObject } from "cloudflare:workers";
 import * as vless from "./vless"
 import * as utils from "./utils"
 import * as wsstream from "./wsstream"
+import { DuplexStreamFromWsStream } from "./stream"
+import { GlobalConfig, UUIDUsage } from "./config"
 
 export function populateStatPage(portalLoad: number[]): string {
 	const now = new Date().toISOString();
@@ -90,19 +92,33 @@ interface WebSocketConnection {
 export class WebSocketHibernationServer extends DurableObject {
 	// Keeps track of all WebSocket connections
 	// When the DO hibernates, gets reconstructed in the constructor
-	sessions: Map<WebSocket, WebSocketConnection>;
-	vlessSharedContext;
+	sessions: Map<WebSocket, WebSocketConnection> = new Map();
+	globalConfig: GlobalConfig;
+	bridgeContext = new vless.BridgeContext(); // Tracks the reverse proxy states
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 
 		const uuid_portal = utils.uuidToUint8Array(env.UUID_PORTAL);
 		const uuid_client = utils.uuidToUint8Array(env.UUID_CLIENT);
+		const uuid_user = utils.uuidToUint8Array(env.UUID);
 
-		this.sessions = new Map();
-		this.vlessSharedContext = new vless.SharedContext((uuid, isPortal) => {
-			return utils.equalUint8Array(uuid, isPortal ? uuid_portal : uuid_client);
-		});
+		this.globalConfig = {
+			portalDomainName: "cyka.blayt.su",
+			bridgeInternalDomain: "reverse",
+			checkUuid: (uuid) => {
+				if (utils.equalUint8Array(uuid, uuid_portal))
+					return UUIDUsage.PORTAL_JOIN;
+
+				if (utils.equalUint8Array(uuid, uuid_client))
+					return UUIDUsage.TO_PORTAL;
+
+				if (utils.equalUint8Array(uuid, uuid_user))
+					return UUIDUsage.TO_FREEDOM;
+
+				return UUIDUsage.INVALID;
+			},
+		};
 
 		// As part of constructing the Durable Object,
 		// we wake up any hibernating WebSockets and
@@ -125,7 +141,7 @@ export class WebSocketHibernationServer extends DurableObject {
 	}
 
 	statPage() {
-		const portalLoad = this.vlessSharedContext.getPortalLoad();
+		const portalLoad = this.bridgeContext.getPortalLoad();
 		return new Response(populateStatPage(portalLoad));
 	}
 
@@ -151,6 +167,8 @@ export class WebSocketHibernationServer extends DurableObject {
 
 		// Generate a random UUID for the session.
 		const uuid = crypto.randomUUID();
+		const logPrefix = uuid.substring(0, 6);
+		const logger = utils.createLogger(logPrefix);
 
 		// Attach the session ID to the WebSocket connection and serialize it.
 		// This is necessary to restore the state of the connection when the Durable Object wakes up.
@@ -178,11 +196,12 @@ export class WebSocketHibernationServer extends DurableObject {
 					onWsNormalClose,
 					onWsUncleanClose,
 				}
+
+				closedPromise.then((closeInfo) => logger("info", "WebSocketStream", `closed normally with code ${closeInfo.code}, reason: "${closeInfo.reason}"`));
+				closedPromise.catch(() => logger("info", "WebSocketStream", "closed with error"));
+				closedPromise.finally(() => controller.close());
+
 				// Add the WebSocket connection to the map of active sessions.
-				closedPromise.finally(() => {
-					controller.close();
-					console.debug(`[WebSocketStream] closed`);
-				});
 				this.sessions.set(server, WebSocketConnection);
 			},
 			cancel: (reason) => {
@@ -192,8 +211,13 @@ export class WebSocketHibernationServer extends DurableObject {
 
 		const writable = new WritableStream<Uint8Array>({
 			write: (chunk) => server.send(chunk),
-			close: () => server.close(),
-			abort: () => server.close(),
+			close: () => {
+				// The server dont need to close the websocket first, as it will cause ERR_CONTENT_LENGTH_MISMATCH
+				// The client will close the connection anyway.
+				// TODO: Setup a timer to close the websocket after 10 seconds.
+				// logger("info", "WebSocketStream", "writable close()");
+				// server.close()
+			},
 		});
 
 		const openInfo: wsstream.WebSocketOpenInfoLike = {
@@ -210,7 +234,8 @@ export class WebSocketHibernationServer extends DurableObject {
 			close: ({ code, reason }: wsstream.WebSocketCloseInfoLike = {}) => server.close(code, reason)
 		};
 
-		await vless.handleVlessRequest(websocketStream, this.vlessSharedContext);
+		const vlessStream = await DuplexStreamFromWsStream(websocketStream);
+		await vless.handleVlessRequest(vlessStream, this.bridgeContext, logger, this.globalConfig);
 
 		return new Response(null, {
 			status: 101,

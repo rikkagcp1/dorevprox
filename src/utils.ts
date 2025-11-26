@@ -1,3 +1,117 @@
+export type LogLevel = "debug" | "info" | "warn" | "error" | "log";
+
+export type Logger = (level: LogLevel, source: string, ...args: any[]) => void;
+
+export function createLogger(sessionId: string): Logger {
+	const pad2 = (n: number) => String(n).padStart(2, "0");
+	const pad6 = (n: number) => String(n).padStart(6, "0");
+
+	// best-effort microsecond timestamp
+	const hasPerf =
+		typeof performance !== "undefined" &&
+		typeof performance.now === "function" &&
+		typeof (performance as any).timeOrigin === "number";
+
+	return (level: LogLevel, source: string, ...args: any[]) => {
+		const nowMicros = hasPerf
+			? Math.floor((performance.timeOrigin + performance.now()) * 1000)
+			: Date.now() * 1000;
+
+		const ms = Math.floor(nowMicros / 1000);
+		const d = new Date(ms);
+		const microsInSecond = nowMicros % 1_000_000;
+
+		const ts =
+			`${d.getFullYear()}/${pad2(d.getMonth() + 1)}/${pad2(d.getDate())} ` +
+			`${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}.` +
+			`${pad6(microsInSecond)}`;
+
+		const levelLabel = level === "log" ? "Info" : (level[0].toUpperCase() + level.slice(1));
+		const src = source.endsWith(":") ? source : `${source}:`;
+		const prefix = `${ts} [${levelLabel}] [${sessionId}] ${src}`;
+
+		const fn = (console as any)[level] ?? console.log;
+		fn(prefix, ...args);
+	};
+}
+
+export type NumberMap = { [key: number]: number };
+
+function assertNonNullObject(obj: unknown) {
+	if (typeof obj !== "object" || obj === null) {
+		throw new Error(`Expected object, but got ${JSON.stringify(obj)}`);
+	}
+}
+
+export function newNumberMap(obj: unknown): NumberMap {
+	assertNonNullObject(obj);
+
+	const result: NumberMap = {};
+
+	for (const [keyStr, rawValue] of Object.entries(obj as any)) {
+		const keyNum = Number.parseInt(keyStr, 10);
+		if (Number.isNaN(keyNum)) {
+			throw new Error(`Invalid key: "${keyStr}" cannot be parsed as number`);
+		}
+
+		let valNum: number;
+		if (typeof rawValue === "string") {
+			valNum = Number.parseInt(rawValue, 10);
+			if (Number.isNaN(valNum)) {
+				throw new Error(`Invalid value for key ${keyStr}: string "${rawValue}" cannot be parsed as number`);
+			}
+		} else if (typeof rawValue === "number") {
+			valNum = rawValue;
+		} else {
+			throw new Error(`Invalid value type for key ${keyStr}: expected string or number, got ${typeof rawValue}`);
+		}
+
+		result[keyNum] = valNum;
+	}
+
+	return result;
+}
+
+export function childStringOf(obj: unknown, key: string, defaultValue?: string): string {
+	assertNonNullObject(obj);
+
+	const maybe = (obj as any)[key];
+	if (typeof maybe === "string") {
+		return maybe;
+	}
+
+	if (defaultValue === undefined) {
+		throw new Error(`Key ${key} does not present`);
+	}
+	return defaultValue;
+}
+
+export function childIntOf(obj: unknown, key: string, defaultValue?: number): number {
+	assertNonNullObject(obj);
+
+	const maybe = (obj as any)[key];
+
+	if (typeof maybe === "number") {
+		if (!Number.isInteger(maybe)) {
+			throw new Error(`Key "${key}" is not an integer: ${maybe}`);
+		}
+		return maybe;
+	}
+
+	if (typeof maybe === "string") {
+		const n = Number.parseInt(maybe, 10);
+		if (!Number.isSafeInteger(n)) {
+			throw new Error(`Key "${key}" cannot be parsed to a safe integer: ${n}`);
+		}
+		return n;
+	}
+
+	if (defaultValue === undefined) {
+		throw new Error(`Key "${key}" does not present`);
+	}
+	return defaultValue;
+}
+
 export function randomBytes(size: number): Uint8Array {
 	const arr = new Uint8Array(size);
 	for (let i = 0; i < size; i++) {
