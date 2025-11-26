@@ -14,6 +14,12 @@
 			"custom_domain": true
 		}
 	],
+	"vars": {
+		"TCPDNS": "8.8.4.4",
+		"PROXYIP": "[2a00:1098:2b::1:AC43:A86A]",
+		"PORTAL": "cyka.blayt.su", // User-defined, must match with the client config
+		"BRIDGE": "reverse", // was reverse.internal.v2fly.org
+	},
 	"migrations": [
 		{
 			"new_sqlite_classes": [

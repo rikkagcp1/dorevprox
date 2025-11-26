@@ -168,7 +168,7 @@ export class BridgeContext {
 	}
 }
 
-export function handlelessRequest(lessStream: DuplexStream, sharedContext: BridgeContext | null, log: utils.Logger, config: GlobalConfig) {
+export function handlelessRequest(lessStream: DuplexStream, bridgeContext: BridgeContext | null, log: utils.Logger, config: GlobalConfig) {
 	const { parser: lessRequestProcessor, lessHeaderPromise: lessRequestPromise } = makeLessHeaderProcessor();
 
 	let remoteTrafficSink: WritableStream<Uint8Array> | null = null;
@@ -192,7 +192,7 @@ export function handlelessRequest(lessStream: DuplexStream, sharedContext: Bridg
 				lessRequest.address.addr === config.portalDomainName) {
 				// Reversed proxy
 
-				if (!sharedContext) {
+				if (!bridgeContext) {
 					log("error", "less/bridge", "No in-memory state, cannot support bridge!");
 					lessStream.close();
 					return;
@@ -232,14 +232,14 @@ export function handlelessRequest(lessStream: DuplexStream, sharedContext: Bridg
 				remoteTrafficSink = muxcoolFrameDecoder.writable;
 				muxcoolFrameDecoder.readable.pipeTo(mux.in);
 
-				const portalRemover = sharedContext.addPortal(mux);
+				const portalRemover = bridgeContext.addPortal(mux);
 				lessStream.closed.finally(async () => {
 					mux.terminate(true);
 					portalRemover();
-					log("info", "less/bridge", `portal left, ${sharedContext.countPortal} available.`);
+					log("info", "less/bridge", `portal left, ${bridgeContext.countPortal} available.`);
 				});
 	
-				log("info", "less/bridge", `new portal joined, ${sharedContext.countPortal} available.`);
+				log("info", "less/bridge", `new portal joined, ${bridgeContext.countPortal} available.`);
 			} else if (lessRequest.instruction == InstructionType.TCP || lessRequest.instruction == InstructionType.UDP) {
 				// Normal proxy
 
@@ -300,13 +300,13 @@ export function handlelessRequest(lessStream: DuplexStream, sharedContext: Bridg
 				}
 
 				// Handle Client->Portal
-				if (!sharedContext) {
+				if (!bridgeContext) {
 					log("error", "less/bridge", "No in-memory state, cannot support bridge!");
 					lessStream.close();
 					return;
 				}
 
-				const mux = sharedContext.findPortal();
+				const mux = bridgeContext.findPortal();
 				if (mux == null) {
 					console.error("[Portal] no portal available");
 					lessStream.close();

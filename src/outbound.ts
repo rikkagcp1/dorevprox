@@ -23,10 +23,10 @@ interface OutboundContext {
 
 type OutboundProtocol = "freedom" | "forward" | "socks" | "ws";
 
-interface OutboundHandler {
-	protocol: OutboundProtocol;
-	mayDoUDP: (request: OutboundRequest) => boolean;
-	handler: (request: OutboundRequest, context: OutboundContext) => Promise<DuplexStream>;
+export interface OutboundHandler {
+	readonly protocol: OutboundProtocol;
+	readonly mayDoUDP: (request: OutboundRequest) => boolean;
+	readonly handler: (request: OutboundRequest, context: OutboundContext) => Promise<DuplexStream>;
 }
 
 async function writeChunk(writableStream: WritableStream<Uint8Array>, chunk: Uint8Array) {

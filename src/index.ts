@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import * as less from "./less"
 import * as utils from "./utils"
 import { DuplexStreamFromWs } from "./stream"
-import { GlobalConfig, UUIDUsage } from "./config"
+import { GlobalConfig, parseEnv } from "./config"
 
 const durableObjEndpoint = "/do";
 
@@ -36,30 +36,7 @@ export function populateStatPage(portalLoad: number[]): string {
 	return lines.join("\n");
 }
 
-function parseEnv(env: Env) : GlobalConfig {
-	const uuid_portal = utils.uuidToUint8Array(env.UUID_PORTAL, "3bcd5018-a42f-4584-a1db-bc7a3592037a");
-	const uuid_client = utils.uuidToUint8Array(env.UUID_CLIENT, "f4e37f87-9156-4698-bba8-87847d23c83e");
-	const uuid_user = utils.uuidToUint8Array(env.UUID, "f1f8dc41-64d4-4c21-898c-035fe9c55763");
-
-	return {
-		portalDomainName: "cyka.blayt.su",
-		bridgeInternalDomain: "reverse",
-		checkUuid: (uuid) => {
-			if (utils.equalUint8Array(uuid, uuid_portal))
-				return UUIDUsage.PORTAL_JOIN;
-
-			if (utils.equalUint8Array(uuid, uuid_client))
-				return UUIDUsage.TO_PORTAL;
-
-			if (utils.equalUint8Array(uuid, uuid_user))
-				return UUIDUsage.TO_FREEDOM;
-
-			return UUIDUsage.INVALID;
-		},
-	};
-}
-
-function handleWs(request: Request, configProvider: () => GlobalConfig) {
+function handleWs(request: Request, bridgeContext: less.BridgeContext | null, configProvider: () => GlobalConfig) {
 	const webSocketPair = new WebSocketPair();
 	const [client, server] = Object.values(webSocketPair);
 
@@ -77,7 +54,7 @@ function handleWs(request: Request, configProvider: () => GlobalConfig) {
 	const globalConfig = configProvider();
 
 	const lessStream = DuplexStreamFromWs(server, earlyDataParseResult.data, logger);
-	less.handlelessRequest(lessStream, null, logger, globalConfig);
+	less.handlelessRequest(lessStream, bridgeContext, logger, globalConfig);
 
 	return new Response(null, {
 		status: 101,
@@ -99,7 +76,7 @@ export default {
 				const upgradeHeader = request.headers.get('Upgrade');
 				if (upgradeHeader && upgradeHeader === 'websocket') {
 					const globalConfig = parseEnv(env);
-					return handleWs(request, () => globalConfig);
+					return handleWs(request, null, () => globalConfig);
 				} else {
 					switch (url.pathname) {
 						case "/ip":
@@ -139,7 +116,7 @@ export class WebSocketHibernationServer extends DurableObject {
 			case "GET":
 				const upgradeHeader = request.headers.get('Upgrade');
 				if (upgradeHeader && upgradeHeader === 'websocket') {
-					return handleWs(request, () => this.globalConfig);
+					return handleWs(request, this.bridgeContext, () => this.globalConfig);
 				} else {
 					switch (pathname) {
 						case "/stats":
