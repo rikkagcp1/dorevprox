@@ -70,7 +70,7 @@ class StatefulSession {
 		this.associateUpload(upload, true);
 	}
 
-	associateDownload(download: WritableStream<Uint8Array>) {
+	associateDownload() {
 		if (this.download) {
 			throw new Error("already associated");
 		}
@@ -82,14 +82,12 @@ class StatefulSession {
 		}
 
 		const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
-		feedthroughStream.readable.pipeTo(download).finally(() => {
-			this.logger("info", "Remote pair closes the session");
-			this.cleanUp();
-		});
 		this.download = feedthroughStream.writable;
 		this.logger("info", "downstream associated");
 
 		this.tryHandleRequest();
+
+		return feedthroughStream.readable;
 	}
 
 	get downloadAssociated() {
@@ -275,10 +273,8 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 				return new Response("downstream has already associated", { status: 400 });
 			}
 
-			const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
-			session.associateDownload(feedthroughStream.writable);
-
-			return new Response(feedthroughStream.readable, {
+			const readable = session.associateDownload();
+			return new Response(readable, {
 				status: 200,
 				headers: isH1 ? {
 					...COMMON_RESP_HEADERS,
@@ -293,17 +289,31 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 				},
 			});
 		} else if (request.method === "POST") { // Stream-up upload
+			if (isH1) {
+				return new Response("Stream-up does not work over HTTP 1.1", { status: 501 });
+			}
+
 			if (session.uploadAssociated) {
 				return new Response("upstream has already associated", { status: 400 });
 			}
 
 			session.associateStreamUp(request.body!);
 
-			return new Response(null, {
+			/**
+			 * Similar to stream-one, we mimic grpc for the upstream. However, if we replies nothing,
+			 * worker will throw:
+			 * `Can't read from request stream after response has been sent`
+			 * 
+			 * So, even we don't establish a downstream for this request, we must reply with a stream
+			 * that just stays there and never sends anything.
+			 */
+			const readable = new ReadableStream();
+			return new Response(readable, {
 				status: 200,
 				headers: {
 					...COMMON_RESP_HEADERS,
 					"Connection": "keep-alive",
+					"Content-Type": "application/grpc",
 					"Referer": makeXPadding(),
 				},
 			});
