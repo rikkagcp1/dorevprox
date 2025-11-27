@@ -18,13 +18,16 @@ const SessionModes = {
 class StatefulSession {
 	private associateTimeout = -1;
 	private sessionMode: keyof typeof SessionModes = "unknown";
+	private closeStreamUp?: () => void;
 	private upload: ReadableStream<Uint8Array> | null = null;
 	private download: WritableStream<Uint8Array> | null = null;
+	private uploadCanceling = false;
+	private downloadCanceling = false;
 	protected readonly logger;
 
 	constructor(
 		readonly id: string,
-		readonly cleanUp: () => void,
+		readonly removeSession: () => void,
 		readonly globalConfig: GlobalConfig,
 	) {
 		const logPrefix = id.substring(0, 6);
@@ -68,6 +71,17 @@ class StatefulSession {
 
 	associateStreamUp(upload: ReadableStream<Uint8Array>) {
 		this.associateUpload(upload, true);
+
+		return new ReadableStream<Uint8Array>({
+			start: (controller) => {
+				this.closeStreamUp = () => controller.close();
+			},
+			cancel: (reason) => {
+				// Only in Stream-up mode
+				this.logger("info", "Remote closes the upload channel");
+				this.close(reason);
+			},
+		});
 	}
 
 	associateDownload() {
@@ -82,7 +96,25 @@ class StatefulSession {
 		}
 
 		const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
-		this.download = feedthroughStream.writable;
+		const downWriter = feedthroughStream.writable.getWriter();
+
+		// Wrap downstream writable to observe close/abort.
+		this.download = new WritableStream<Uint8Array>({
+			write: (chunk) => downWriter.write(chunk), // or cache a writer once; see note below
+			close: async () => {
+				// Close underlying writable first (flush)
+				await downWriter.close();
+
+				// Then close upstream and cleanup
+				this.logger("info", "downstream closed -> closing upload");
+				this.close("downstream closed");
+			},
+			abort: async (reason) => {
+				await downWriter.abort(reason).catch(() => { });
+				this.logger("info", "downstream aborted -> closing upload", reason);
+				this.close("downstream aborted");
+			},
+		});
 		this.logger("info", "downstream associated");
 
 		this.tryHandleRequest();
@@ -99,12 +131,33 @@ class StatefulSession {
 	}
 
 	close(reason?: string): void {
-		this.logger("info", "session close()", reason);
-		if (this.download) {
+		if (this.download && !this.downloadCanceling) {
+			this.downloadCanceling = true;
 			this.download.close();
+		} else if (!this.download) {
+			// No downstream exists; treat as already closed.
+			this.downloadCanceling = true;
 		}
 
-		this.cleanUp();
+		// For Stream-up mode
+		if (this.closeStreamUp && !this.uploadCanceling) {
+			this.uploadCanceling = true;
+			this.closeStreamUp();
+		}
+
+		// For Packet-up mode
+		if (this.packetUpWriter && !this.uploadCanceling) {
+			this.uploadCanceling = true;
+			this.packetUpWriter.close().catch(() => {});
+		} else if (!this.upload) {
+			// No upstream exists; treat as already closed.
+			this.uploadCanceling = true;
+		}
+
+		if (this.downloadCanceling && this.uploadCanceling) {
+			this.logger("info", "session close()", reason);
+			this.removeSession();
+		}
 	}
 
 	// For Packet-up only
@@ -263,7 +316,7 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 
 	let session = context.sessions.get(inbound.sessionId);
 	if (!session) {
-		session = new StatefulSession(inbound.sessionId, () => context.sessions.delete(inbound.sessionId),  globalConfig);
+		session = new StatefulSession(inbound.sessionId, () => context.sessions.delete(inbound.sessionId), globalConfig);
 		context.sessions.set(inbound.sessionId, session);
 	}
 
@@ -297,7 +350,7 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 				return new Response("upstream has already associated", { status: 400 });
 			}
 
-			session.associateStreamUp(request.body!);
+			const readable = session.associateStreamUp(request.body!);
 
 			/**
 			 * Similar to stream-one, we mimic grpc for the upstream. However, if we replies nothing,
@@ -307,7 +360,6 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 			 * So, even we don't establish a downstream for this request, we must reply with a stream
 			 * that just stays there and never sends anything.
 			 */
-			const readable = new ReadableStream();
 			return new Response(readable, {
 				status: 200,
 				headers: {
