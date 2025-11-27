@@ -67,7 +67,6 @@ function handleWs(request: Request, bridgeContext: less.BridgeContext | null, co
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
-		console.log(request.method, request.url);
 
 		if (url.pathname.startsWith(durableObjEndpoint)) {
 			// Let durable object handle the request
@@ -143,7 +142,7 @@ export class WebSocketHibernationServer extends DurableObject {
 						case "/ip":
 							return fetch("https://ifconfig.co");
 						case "/conn":
-							return new Response("Session count:" + this.httpContext.sessions.size);
+							return new Response(this.httpContext.summary());
 					}
 				}
 			} break;

@@ -171,27 +171,9 @@ export function parseOutboundConfig(jsonArray: any[]) {
 	return outboundHandlers;
 }
 
-export async function handleOutBound(request: OutboundRequest, globalConfig: GlobalConfig,
-	log: Logger,
-	disconnect: () => void): Promise<DuplexStream> {
-
-	const outbounds = parseOutboundConfig([
-		{
-			protocol: "freedom",
-			dnsTCPServer: "8.8.4.4",
-		},
-		{
-			protocol: "forward",
-			address: "[2a00:1098:2b::1:AC43:A86A]",
-			portMap: {
-				80: 80,
-				443: 443,
-			}
-		},
-	]);
-
+export async function handleOutBound(request: OutboundRequest, globalConfig: GlobalConfig, log: Logger,): Promise<DuplexStream> {
 	// Try each outbound method until we find a working one.
-	for (const outbound of outbounds) {
+	for (const outbound of globalConfig.outbounds) {
 		if (request.isUDP && !outbound.mayDoUDP(request)) {
 			continue; // This outbound method does not support UDP
 		}
@@ -246,6 +228,5 @@ export async function handleOutBound(request: OutboundRequest, globalConfig: Glo
 		}
 	}
 
-	disconnect();
 	throw new Error('No more available outbound chain, abort!')
 }

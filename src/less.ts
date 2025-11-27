@@ -280,22 +280,27 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 				if (uuidUsage === UUIDUsage.TO_FREEDOM) {
 					// Handle Client->Freedom
 
-					const {
-						readable,
-						writable,
-					} = await handleOutBound(
-						{
-							isUDP: !(lessRequest.instruction === InstructionType.TCP),
-							port: lessRequest.port,
-							address: lessRequest.address,
-							firstChunk: chunk,
-						},
-						config,
-						log,
-						lessStream.close
-					);
-					remoteTrafficSink = writable;
-					readable.pipeThrough(lessResponsePrepender(chunkIn => chunkIn)).pipeTo(lessStream.writable);
+					try {
+						const {
+							readable,
+							writable,
+							closed,
+						} = await handleOutBound(
+							{
+								isUDP: !(lessRequest.instruction === InstructionType.TCP),
+								port: lessRequest.port,
+								address: lessRequest.address,
+								firstChunk: chunk,
+							},
+							config,
+							log
+						);
+						remoteTrafficSink = writable;
+						readable.pipeThrough(lessResponsePrepender(chunkIn => chunkIn)).pipeTo(lessStream.writable);
+					} catch(e) {
+						lessStream.close(e);
+					}
+
 					return;
 				}
 

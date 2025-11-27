@@ -2,6 +2,8 @@ import { LogLevel, createLogger, randomInt } from "./utils";
 import { handlelessRequest } from "./less";
 import { GlobalConfig } from "./config";
 
+// https://streams.spec.whatwg.org/
+
 const ASSOCIATE_TIMEOUT = 30000;
 
 const COMMON_RESP_HEADERS = {
@@ -23,6 +25,7 @@ class StatefulSession {
 	private download: WritableStream<Uint8Array> | null = null;
 	private uploadCanceling = false;
 	private downloadCanceling = false;
+	private removed = false;
 	protected readonly logger;
 
 	constructor(
@@ -44,7 +47,7 @@ class StatefulSession {
 			handlelessRequest({
 				readable: this.upload,
 				writable: this.download,
-				close: () => this.close(),
+				close: (reason) => this.close(reason),
 				closed: new Promise(() => { })
 			}, null, this.logger, this.globalConfig);
 		}
@@ -131,6 +134,8 @@ class StatefulSession {
 	}
 
 	close(reason?: string): void {
+		this.logger("debug", "Call session.close() with reason", reason);
+
 		if (this.download && !this.downloadCanceling) {
 			this.downloadCanceling = true;
 			this.download.close();
@@ -154,10 +159,15 @@ class StatefulSession {
 			this.uploadCanceling = true;
 		}
 
-		if (this.downloadCanceling && this.uploadCanceling) {
-			this.logger("info", "session close()", reason);
+		if (this.downloadCanceling && this.uploadCanceling && !this.removed) {
+			this.logger("info", "session closed with reason:", reason);
 			this.removeSession();
+			this.removed = true;
 		}
+	}
+
+	summary(): string {
+		return `[${this.id.substring(0, 6)}] ${this.downloadAssociated ? "downloadAssociated " : ""}${this.uploadCanceling ? "uploadCanceling" : ""}${this.uploadAssociated ? "uploadAssociated " : ""}${this.downloadCanceling ? "downloadCanceling" : ""}`;
 	}
 
 	// For Packet-up only
@@ -168,8 +178,7 @@ class StatefulSession {
 	private lastEnqueuedSeq = -1;
 
 	packetIn(seq: number, chunk: Uint8Array): boolean {
-		this.logger("debug", "seq: ", seq, "length: ", chunk.byteLength);
-
+		this.logger("debug", "packetIn seq: ", seq, "length: ", chunk.byteLength);
 		if (this.sessionMode === "stream-up") {
 			throw new Error("Already in stream-up mode!");
 		}
@@ -253,6 +262,10 @@ class StatefulSession {
 
 export class StatefulContext {
 	sessions: Map<string, StatefulSession> = new Map();
+
+	summary(): string {
+		return "Session count: " + this.sessions.size + "\n" + [...this.sessions.values()].map((session) => session.summary()).join("\n");
+	}
 }
 
 export type HttpInbound =
