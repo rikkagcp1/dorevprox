@@ -3,8 +3,10 @@ import * as less from "./less"
 import * as utils from "./utils"
 import { DuplexStreamFromWs } from "./stream"
 import { GlobalConfig, parseEnv } from "./config"
+import { parseInboundPath, handleHttp } from "./http";
 
 const durableObjEndpoint = "/do";
+const httpEndpoint = "/http";
 
 export function populateStatPage(portalLoad: number[]): string {
 	const now = new Date().toISOString();
@@ -72,7 +74,7 @@ export default {
 		}
 
 		switch (request.method) {
-			case "GET":
+			case "GET": {
 				const upgradeHeader = request.headers.get('Upgrade');
 				if (upgradeHeader && upgradeHeader === 'websocket') {
 					const globalConfig = parseEnv(env);
@@ -83,6 +85,15 @@ export default {
 							return fetch("https://ifconfig.co");
 					}
 				}
+			} break;
+
+			case "POST": {
+				const httpInbound = parseInboundPath(url.pathname, httpEndpoint);
+				if (httpInbound) {
+					const globalConfig = parseEnv(env);
+					return handleHttp(httpInbound, request, null, globalConfig);
+				}
+			} break;
 		}
 
 		return new Response(
@@ -113,7 +124,7 @@ export class WebSocketHibernationServer extends DurableObject {
 		const pathname = (new URL(request.url)).pathname.substring(durableObjEndpoint.length);
 
 		switch (request.method) {
-			case "GET":
+			case "GET": {
 				const upgradeHeader = request.headers.get('Upgrade');
 				if (upgradeHeader && upgradeHeader === 'websocket') {
 					return handleWs(request, this.bridgeContext, () => this.globalConfig);
@@ -126,6 +137,14 @@ export class WebSocketHibernationServer extends DurableObject {
 							return fetch("https://ifconfig.co");
 					}
 				}
+			} break;
+
+			case "POST": {
+				const httpInbound = parseInboundPath(pathname, httpEndpoint);
+				if (httpInbound) {
+					return handleHttp(httpInbound, request, null, this.globalConfig);
+				}
+			} break;
 		}
 
 		return new Response(null, {
