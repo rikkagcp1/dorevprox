@@ -1,9 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import * as less from "./less"
+import * as http from "./http";
 import * as utils from "./utils"
 import { DuplexStreamFromWs } from "./stream"
 import { GlobalConfig, parseEnv } from "./config"
-import { parseInboundPath, handleHttp } from "./http";
 
 const durableObjEndpoint = "/do";
 const httpEndpoint = "/http";
@@ -67,6 +67,7 @@ function handleWs(request: Request, bridgeContext: less.BridgeContext | null, co
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
+		console.log(request.method, request.url);
 
 		if (url.pathname.startsWith(durableObjEndpoint)) {
 			// Let durable object handle the request
@@ -88,10 +89,10 @@ export default {
 			} break;
 
 			case "POST": {
-				const httpInbound = parseInboundPath(url.pathname, httpEndpoint);
+				const httpInbound = http.parseInboundPath(url.pathname, httpEndpoint);
 				if (httpInbound) {
 					const globalConfig = parseEnv(env);
-					return handleHttp(httpInbound, request, null, globalConfig);
+					return http.handleHttp(httpInbound, request, null, globalConfig);
 				}
 			} break;
 		}
@@ -106,13 +107,14 @@ export default {
 			}
 		);
 	},
-};
+}
 
 // Durable Object
 export class WebSocketHibernationServer extends DurableObject {
 	// In-memory states
 	globalConfig: GlobalConfig;
 	bridgeContext = new less.BridgeContext(); // Tracks the reverse proxy states
+	httpContext = new http.StatefulContext();
 
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -129,20 +131,27 @@ export class WebSocketHibernationServer extends DurableObject {
 				if (upgradeHeader && upgradeHeader === 'websocket') {
 					return handleWs(request, this.bridgeContext, () => this.globalConfig);
 				} else {
+					const httpInbound = http.parseInboundPath(pathname, httpEndpoint);
+					if (httpInbound) {
+						return await http.handleHttp(httpInbound, request, this.httpContext, this.globalConfig);
+					}
+
 					switch (pathname) {
 						case "/stats":
 							const portalLoad = this.bridgeContext.getPortalLoad();
 							return new Response(populateStatPage(portalLoad));
 						case "/ip":
 							return fetch("https://ifconfig.co");
+						case "/conn":
+							return new Response("Session count:" + this.httpContext.sessions.size);
 					}
 				}
 			} break;
 
 			case "POST": {
-				const httpInbound = parseInboundPath(pathname, httpEndpoint);
+				const httpInbound = http.parseInboundPath(pathname, httpEndpoint);
 				if (httpInbound) {
-					return handleHttp(httpInbound, request, null, this.globalConfig);
+					return await http.handleHttp(httpInbound, request, this.httpContext, this.globalConfig);
 				}
 			} break;
 		}

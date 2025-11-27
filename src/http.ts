@@ -1,9 +1,207 @@
-import { Logger, createLogger } from "./utils";
+import { LogLevel, createLogger, randomInt } from "./utils";
 import { handlelessRequest } from "./less";
 import { GlobalConfig } from "./config";
 
-export class HttpContext {
+const ASSOCIATE_TIMEOUT = 30000;
 
+const COMMON_RESP_HEADERS = {
+	"X-Accel-Buffering": "no",
+	"Cache-Control": "no-store",
+}
+
+const SessionModes = {
+	"unknown": "http",
+	"stream-up": "http/stream-up",
+	"packet-up": "http/packet-up",
+} as const;
+
+class StatefulSession {
+	private associateTimeout = -1;
+	private sessionMode: keyof typeof SessionModes = "unknown";
+	private upload: ReadableStream<Uint8Array> | null = null;
+	private download: WritableStream<Uint8Array> | null = null;
+	protected readonly logger;
+
+	constructor(
+		readonly id: string,
+		readonly cleanUp: () => void,
+		readonly globalConfig: GlobalConfig,
+	) {
+		const logPrefix = id.substring(0, 6);
+		const logger = createLogger(logPrefix);
+		this.logger = (level: LogLevel, ...args: any[]) => logger(level, SessionModes[this.sessionMode], ...args);
+	}
+
+	private tryHandleRequest() {
+		if (this.upload && this.download && this.associateTimeout > 0) {
+			clearTimeout(this.associateTimeout);
+			this.associateTimeout = -1;
+
+			this.logger("info", "start processing request");
+			handlelessRequest({
+				readable: this.upload,
+				writable: this.download,
+				close: () => this.close(),
+				closed: new Promise(() => { })
+			}, null, this.logger, this.globalConfig);
+		}
+	}
+
+	private associateUpload(upload: ReadableStream<Uint8Array>, isStreamUp: boolean) {
+		if (this.upload) {
+			throw new Error("already associated");
+		}
+
+		if (this.upload === null && this.download === null) {
+			this.associateTimeout = setTimeout(() => {
+				this.close("associate downstream timeout");
+			}, ASSOCIATE_TIMEOUT);
+		}
+
+		this.sessionMode = isStreamUp ? "stream-up" : "packet-up";
+
+		this.upload = upload;
+		this.logger("info", "upstream associated");
+
+		this.tryHandleRequest();
+	}
+
+	associateStreamUp(upload: ReadableStream<Uint8Array>) {
+		this.associateUpload(upload, true);
+	}
+
+	associateDownload(download: WritableStream<Uint8Array>) {
+		if (this.download) {
+			throw new Error("already associated");
+		}
+
+		if (this.upload === null && this.download === null) {
+			this.associateTimeout = setTimeout(() => {
+				this.close("associate downstream timeout");
+			}, ASSOCIATE_TIMEOUT);
+		}
+
+		const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
+		feedthroughStream.readable.pipeTo(download).finally(() => {
+			this.logger("info", "Remote pair closes the session");
+			this.cleanUp();
+		});
+		this.download = feedthroughStream.writable;
+		this.logger("info", "downstream associated");
+
+		this.tryHandleRequest();
+	}
+
+	get downloadAssociated() {
+		return this.download !== null;
+	}
+
+	get uploadAssociated() {
+		return this.upload !== null;
+	}
+
+	close(reason?: string): void {
+		this.logger("info", "session close()", reason);
+		if (this.download) {
+			this.download.close();
+		}
+
+		this.cleanUp();
+	}
+
+	// For Packet-up only
+	private packetUpWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
+	private draining = false;
+	private drainQueued = false;
+	private fifo: { seq: number, chunk: Uint8Array }[] = [];
+	private lastEnqueuedSeq = -1;
+
+	packetIn(seq: number, chunk: Uint8Array): boolean {
+		this.logger("debug", "seq: ", seq, "length: ", chunk.byteLength);
+
+		if (this.sessionMode === "stream-up") {
+			throw new Error("Already in stream-up mode!");
+		}
+
+		if (!this.packetUpWriter) {
+			const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
+			this.packetUpWriter = feedthroughStream.writable.getWriter();
+			this.associateUpload(feedthroughStream.readable, false);
+		}
+
+		if (seq <= this.lastEnqueuedSeq)
+			return false; // Duplicated found
+
+		if (this.fifo.find((item) => seq === item.seq))
+			return false; // Duplicated found
+
+		// Find a correct location and insert into the FIFO
+		let lo = 0;
+		let hi = this.fifo.length;
+		while (lo < hi) {
+			const mid = (lo + hi) >>> 1;
+			if (this.fifo[mid].seq < seq)
+				lo = mid + 1;
+			else
+				hi = mid;
+		}
+		this.fifo.splice(lo, 0, { seq, chunk });
+
+		if (this.isDrainable()) {
+			this.scheduleDrain();
+		} else if (this.fifo.length > 30) {
+			// FIFO full
+			throw new Error("fifo full");
+		}
+
+		return true;
+	}
+
+	private isDrainable() {
+		return this.fifo.length > 0 && this.fifo[0].seq === this.lastEnqueuedSeq + 1;
+	}
+
+	private scheduleDrain() {
+		if (this.drainQueued)
+			return;
+
+		this.drainQueued = true;
+		queueMicrotask(async () => {
+			this.drainQueued = false;
+
+			if (this.draining)
+				return;
+			this.draining = true;
+
+			try {
+				while (true) {
+					if (this.fifo.length === 0)
+						break;
+
+					if (this.fifo[0].seq !== this.lastEnqueuedSeq + 1)
+						break;
+
+					// The first item in the FIFO
+					const item = this.fifo.shift()!;
+
+					await this.packetUpWriter!.ready;
+					await this.packetUpWriter!.write(item.chunk);
+
+					this.lastEnqueuedSeq = item.seq;
+				}
+			} finally {
+				this.draining = false;
+
+				if (this.isDrainable()) {
+					this.scheduleDrain();
+				}
+			}
+		});
+	}
+}
+
+export class StatefulContext {
+	sessions: Map<string, StatefulSession> = new Map();
 }
 
 export type HttpInbound =
@@ -11,7 +209,7 @@ export type HttpInbound =
 		type: "stream-one";
 	}
 	| {
-		type: "stream-up";
+		type: "stream-unidirectional";
 		sessionId: string;
 	}
 	| {
@@ -20,14 +218,23 @@ export type HttpInbound =
 		seq: number;
 	};
 
+function makeXPadding() {
+	return "X".repeat(randomInt(100, 1000));
+}
 
-export function handleHttp(inbound: HttpInbound, request: Request, context: HttpContext | null, globalConfig: GlobalConfig): Response {
-	if (inbound.type === 'stream-one') {
+export async function handleHttp(inbound: HttpInbound, request: Request, context: StatefulContext | null, globalConfig: GlobalConfig): Promise<Response> {
+	const isH1 = request.cf?.httpProtocol === "HTTP/1.1";
+
+	if (inbound.type == "stream-one") {
+		if (isH1) {
+			return new Response("Stream-one does not work over HTTP 1.1", { status: 501 });
+		}
+
 		const uuid = crypto.randomUUID();
 		const logPrefix = uuid.substring(0, 6);
 		const logger = createLogger(logPrefix);
-	
-		logger("info", "http", `Got request, type: ${inbound.type}`);
+
+		logger("info", "http/stream-one", "start stateless session");
 
 		const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
 
@@ -38,29 +245,75 @@ export function handleHttp(inbound: HttpInbound, request: Request, context: Http
 				logger("info", "http", "Http close()");
 				feedthroughStream.writable.close();
 			},
-			closed: new Promise(()=>{})
+			closed: new Promise(() => { })
 		}, null, logger, globalConfig);
 
 		return new Response(feedthroughStream.readable, {
+			status: 200,
 			headers: {
-				'X-Accel-Buffering': 'no',
-				'Cache-Control': 'no-store',
-				Connection: 'keep-alive',
-				'User-Agent': 'Go-http-client/2.0',
-				'Content-Type': 'application/grpc',
+				...COMMON_RESP_HEADERS,
+				"Connection": "keep-alive",
+				"Content-Type": "application/grpc",
+				"Referer": makeXPadding(),
 			},
 		});
 	}
 
-	return new Response(
-		"Only support stream-one at the moment",
-		{
-			status: 501,
-			headers: {
-				'Content-Type': 'text/plain',
-			},
+	if (context === null) {
+		return new Response("Modes other than stream-one requires in-memory state", { status: 400 });
+	}
+
+	let session = context.sessions.get(inbound.sessionId);
+	if (!session) {
+		session = new StatefulSession(inbound.sessionId, () => context.sessions.delete(inbound.sessionId),  globalConfig);
+		context.sessions.set(inbound.sessionId, session);
+	}
+
+	if (inbound.type === "stream-unidirectional") {
+		if (request.method === "GET") { // Stream-up download or Packet-up download
+			if (session.downloadAssociated) {
+				return new Response("downstream has already associated", { status: 400 });
+			}
+
+			const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
+			session.associateDownload(feedthroughStream.writable);
+
+			return new Response(feedthroughStream.readable, {
+				status: 200,
+				headers: isH1 ? {
+					...COMMON_RESP_HEADERS,
+					"Content-Type": "text/event-stream",
+					"Transfer-Encoding": "chunked",
+					"Referer": makeXPadding(),
+				} : {
+					...COMMON_RESP_HEADERS,
+					"Content-Type": "text/event-stream",
+					"Connection": "keep-alive",
+					"Referer": makeXPadding(),
+				},
+			});
+		} else if (request.method === "POST") { // Stream-up upload
+			if (session.uploadAssociated) {
+				return new Response("upstream has already associated", { status: 400 });
+			}
+
+			session.associateStreamUp(request.body!);
+
+			return new Response(null, {
+				status: 200,
+				headers: {
+					...COMMON_RESP_HEADERS,
+					"Connection": "keep-alive",
+					"Referer": makeXPadding(),
+				},
+			});
 		}
-	);
+	} else { // Packet-up upload
+		session.packetIn(inbound.seq, await request.bytes());
+		return new Response(null, { status: 200 });
+	}
+
+	return new Response("Not supported", { status: 501, });
 }
 
 export function parseInboundPath(path: string, endpoint: string): HttpInbound | null {
@@ -76,17 +329,17 @@ export function parseInboundPath(path: string, endpoint: string): HttpInbound | 
 	switch (segments.length) {
 		case 0:
 			// /httpEndpoint/, Stream-one
-			return { type: "stream-one" };
+			return { type: "stream-one", };
 
 		case 1:
-			// /httpEndpoint/sessionId, Stream-up
+			// /httpEndpoint/sessionId, Stream-up or Packet-up downstream
 			return {
-				type: "stream-up",
+				type: "stream-unidirectional",
 				sessionId: segments[0],
 			};
 
 		case 2:
-			// /httpEndpoint/sessionId/seq, Packet-up
+			// /httpEndpoint/sessionId/seq, Packet-up upstream
 			const seqStr = segments[1];
 			const seq = parseInt(seqStr);
 
