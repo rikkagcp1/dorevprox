@@ -36,8 +36,10 @@
 
 		/* Skip type checking all .d.ts files. */
 		"skipLibCheck": true,
-		"types": [
-			"./worker-configuration.d.ts"
-		]
-	}
+		"types": []
+	},
+
+	"files": [],
+
+	"references": [{ "path": "./tsconfig.nodejs.json" }, { "path": "./tsconfig.wrangler.json" }]
 }
