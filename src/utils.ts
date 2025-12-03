@@ -255,3 +255,38 @@ export function safeCloseWebSocket(webSocket: WebSocket) {
 		console.error('safeCloseWebSocket error', error);
 	}
 }
+
+/**
+ * @return A promise that resolves when the given request aborts (actively canceled by the request sender)
+ */
+export function monitorRequestAbort(request: Request) {
+	return new Promise<void>((resolve) => {
+		request.signal.addEventListener("abort", () => resolve());
+	});
+}
+
+/**
+ * Wraps a promise with a timeout.
+ *
+ * @typeParam T - The resolved value type of {@link promise}.
+ * @param promise - The promise to await.
+ * @param ms - Timeout duration in milliseconds.
+ * @param label - Error message used if the timeout elapses before {@link promise} settles.
+ * @returns A new promise that:
+ *   - resolves with {@link promise}'s value if it resolves before the timeout,
+ *   - rejects with {@link promise}'s rejection reason if it rejects before the timeout,
+ *   - rejects with `Error(label)` if the timeout elapses first.
+ *
+ * @remarks
+ * The timeout timer is always cleared once the returned promise settles.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label = "timeout"): Promise<T> {
+	let timer: any;
+	const timerPromise = new Promise<never>((_, reject) => {
+		timer = setTimeout(() => {
+			reject(new Error(label))
+		}, ms);
+	});
+
+	return Promise.race([promise, timerPromise]).finally(() => clearTimeout(timer));
+}

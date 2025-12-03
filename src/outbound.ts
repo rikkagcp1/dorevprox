@@ -1,7 +1,7 @@
 import { Address, addressToString } from "./address";
 import { DuplexStream, DuplexStreamOfTcp } from "./stream";
 import { GlobalConfig } from "./config";
-import { NumberMap, newNumberMap, childStringOf, childIntOf, uuidToUint8Array, Logger } from "./utils";
+import { NumberMap, newNumberMap, childStringOf, childIntOf, uuidToUint8Array, Logger, withTimeout } from "./utils";
 
 interface OutboundRequest {
 	isUDP: boolean,
@@ -70,7 +70,8 @@ async function handleForward(request: OutboundRequest, context: OutboundContext,
 		}
 	}
 
-	const tcpSocket = await context.newTcp(proxyServer, portDest);
+	const tcpSocketPromise = context.newTcp(proxyServer, portDest);
+	const tcpSocket = await withTimeout(tcpSocketPromise, 3000, "TCP connection timeout");
 	tcpSocket.closed.catch(error => console.log('[forward] tcpSocket closed with error: ', error.message));
 	context.log("info", logSource, `Forwarding tcp://${request.address}:${request.port} to ${proxyServer}:${portDest}`);
 	await writeChunk(tcpSocket.writable, request.firstChunk);

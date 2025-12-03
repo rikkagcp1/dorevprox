@@ -129,7 +129,7 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 }
 
 export async function DuplexStreamOfTcp(hostname: string, port: number) : Promise<DuplexStream> {
-	const socket = connect({hostname, port});
+	const socket = connect({hostname, port}, {allowHalfOpen: true});
 	await socket.opened;
 	return socket;
 }

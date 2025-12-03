@@ -346,6 +346,16 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 			}
 
 		},
+		close: async () => {
+			if (remoteTrafficSink) {
+				await remoteTrafficSink?.close();
+			}
+		},
+		abort: async (reason) => {
+			if (remoteTrafficSink) {
+				await remoteTrafficSink?.abort(reason);
+			}
+		},
 	} as UnderlyingSink<Uint8Array>);
 
 	lessStream.readable.pipeThrough(lessRequestProcessor)
@@ -356,7 +366,9 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 		// 		controller.enqueue(chunk);
 		// 	},
 		// }))
-		.pipeTo(lessRequestHandler);
+		.pipeTo(lessRequestHandler).finally(() => {
+			log("info", "lessStream.readable.pipeThrough(lessRequestProcessor).pipeTo(lessRequestHandler).finally");
+		});
 }
 
 function makeLessHeaderProcessor() {

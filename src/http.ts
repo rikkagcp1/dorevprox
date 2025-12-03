@@ -1,10 +1,11 @@
-import { LogLevel, createLogger, randomInt, newPromiseWithHandle } from "./utils";
+import { LogLevel, createLogger, randomInt, newPromiseWithHandle, monitorRequestAbort } from "./utils";
 import { handlelessRequest } from "./less";
 import { GlobalConfig } from "./config";
+import { connect } from "cloudflare:sockets";
 
 // https://streams.spec.whatwg.org/
 
-const ASSOCIATE_TIMEOUT = 30000;
+const ASSOCIATE_TIMEOUT = 3000;
 
 const COMMON_RESP_HEADERS = {
 	"X-Accel-Buffering": "no",
@@ -18,15 +19,16 @@ const SessionModes = {
 } as const;
 
 class StatefulSession {
-	private associateTimeout = -1;
+	private associateTimeout: any | null = null;
 	private sessionMode: keyof typeof SessionModes = "unknown";
-	private closeStreamUp?: () => void;
+
 	private upload: ReadableStream<Uint8Array> | null = null;
 	private download: WritableStream<Uint8Array> | null = null;
-	private uploadCanceling = false;
-	private downloadCanceling = false;
-	private removed = false;
+	private upStreamCloseFunc: (() => void) | null = null; 
+	private downStreamCloseFunc: (() => void) | null = null; 
 	protected readonly logger;
+
+	private closeOutbound?: () => Promise<void>;
 
 	/**
 	 * Resolves when both data paths are closed and/or aborted.
@@ -47,15 +49,18 @@ class StatefulSession {
 	}
 
 	private tryHandleRequest() {
-		if (this.upload && this.download && this.associateTimeout > 0) {
-			clearTimeout(this.associateTimeout);
-			this.associateTimeout = -1;
+		if (this.upload && this.download) {
+			this.clearAssociateTimer();
 
 			this.logger("info", "start processing request");
+
 			handlelessRequest({
 				readable: this.upload,
 				writable: this.download,
-				close: (reason) => this.close(true, reason),
+				close: (reason) => {
+					this.logger("info", "Error while establishing connection:", reason);
+					this.close();
+				},
 				closed: this.closed,
 			}, null, this.logger, this.globalConfig);
 		}
@@ -68,7 +73,8 @@ class StatefulSession {
 
 		if (this.upload === null && this.download === null) {
 			this.associateTimeout = setTimeout(() => {
-				this.close(false, "associate downstream timeout");
+				this.logger("info", "associate downstream timeout");
+				this.closeUpload();
 			}, ASSOCIATE_TIMEOUT);
 		}
 
@@ -81,62 +87,100 @@ class StatefulSession {
 	}
 
 	associateStreamUp(upload: ReadableStream<Uint8Array>) {
-		this.associateUpload(upload, true);
-
-		const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
-		const writer = feedthroughStream.writable.getWriter();
-		writer.closed.then(() => {
-			this.logger("info", "The remote closes the upload channel");
-			this.uploadCanceling = true;
-			this.close(true, "normally");
-		}, (reason) => {
-			this.logger("info", "The remote aborts the upload channel");
-			this.uploadCanceling = true;
-			this.close(false, reason);
+		let uploadTerminator! : () => void;
+		const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>({
+			start: (controller) => {
+				uploadTerminator = () => controller.terminate();
+			},
 		});
-		this.closeStreamUp = () => writer.close();
 
-		return feedthroughStream.readable;
+		let uploadRequestTerminator! : () => void;
+		/**
+		 * This ReadableStream just sits there until we close it to signal the end of the POST request.
+		 */
+		const dummyReadable = new ReadableStream<Uint8Array>({
+			start: (controller) => {
+				uploadRequestTerminator = () => controller.close();
+			},
+		});
+
+		this.upStreamCloseFunc = () => {
+			this.logger("info", "upStreamCloseFunc()");
+			uploadTerminator();
+			uploadRequestTerminator();
+		}
+
+		upload.pipeTo(feedthroughStream.writable).finally(() => {
+			this.logger("info", "upload.pipeTo finally in associateStreamUp");
+		});
+
+		this.associateUpload(feedthroughStream.readable, true);
+
+		return dummyReadable;
 	}
 
-	associateDownload() {
+	/**
+	 * @param endOfRequest resolves when the client sends a TCP FIN.
+	 * In response, we should close the client->server stream.
+	 * @returns 
+	 */
+	associateDownload(endOfRequest: Promise<void>) {
 		if (this.download) {
 			throw new Error("already associated");
 		}
 
 		if (this.upload === null && this.download === null) {
 			this.associateTimeout = setTimeout(() => {
-				this.close(false, "associate upstream timeout");
+				this.logger("info", "associate upstream timeout");
+				this.closeDownload();
 			}, ASSOCIATE_TIMEOUT);
 		}
 
-		const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
-		const downWriter = feedthroughStream.writable.getWriter();
+		endOfRequest.finally(() => {
+			this.logger("info", "client-side wants to close");
+			this.closeUpload();
+		});
 
-		// Wrap downstream writable to observe close/abort.
-		this.download = new WritableStream<Uint8Array>({
-			write: (chunk) => downWriter.write(chunk), // or cache a writer once; see note below
-			close: async () => {
-				// Close underlying writable first (flush)
-				await downWriter.close();
+		const echoStream = new TransformStream<Uint8Array, Uint8Array>({
+			start: (controller) => {
+				this.downStreamCloseFunc = () => {
+					// Errors this.download, closes the ReadableStream returned by the function.
+					try { controller.terminate(); } catch {}
 
-				// Then close upstream and cleanup
-				this.logger("info", "downstream closes");
-				this.downloadCanceling = true;
-				this.close(true, "downstream closes");
+					// If the downStream pipeTo chain is not complete, we need to close from the end.
+					try { this.download?.close(); } catch {}
+				}
 			},
-			abort: async (reason) => {
-				await downWriter.abort(reason).catch(() => { });
-				this.logger("info", "downstream aborts:", reason);
-				this.downloadCanceling = true;
-				this.close(false, "downstream aborts");
+			flush: (controller) => {
+				this.logger("debug", "associateDownload feedthroughStream flush");
+			},
+			cancel: (reason) => {
+				this.logger("debug", "associateDownload feedthroughStream cancel");
 			},
 		});
+
+		const identityStream = new TransformStream<Uint8Array, Uint8Array>();
+		identityStream.readable.pipeTo(echoStream.writable).finally(async () => {
+			this.logger("info", "downstream closes");
+
+			// Attempt to close the upload, skip if already closed
+			this.closeUpload();
+
+			// When we start the close "handshake", this is the last step
+			if (this.closeOutbound) {
+				await this.closeOutbound();
+			}
+
+			this.logger("info", "end of stateful session");
+			this._closed.resolve();
+		});
+		this.download = identityStream.writable;
+
 		this.logger("info", "downstream associated");
 
 		this.tryHandleRequest();
 
-		return feedthroughStream.readable;
+		return echoStream.readable;
 	}
 
 	get downloadAssociated() {
@@ -147,49 +191,42 @@ class StatefulSession {
 		return this.upload !== null;
 	}
 
-	close(isClean: boolean, reason?: string): void {
-		this.logger("debug", "session.close() with:", reason);
-
-		if (this.download && !this.downloadCanceling) {
-			this.downloadCanceling = true;
-			this.download.close();
-			this.logger("info", "download.close()");
-		} else if (!this.download) {
-			// No downstream exists; treat as already closed.
-			this.downloadCanceling = true;
-		}
-
-		// For Stream-up mode
-		if (this.closeStreamUp && !this.uploadCanceling) {
-			this.uploadCanceling = true;
-			this.closeStreamUp();
-			this.logger("info", "closeStreamUp()");
-		}
-
-		// For Packet-up mode
-		if (this.packetUpWriter && !this.uploadCanceling) {
-			this.uploadCanceling = true;
-			this.packetUpWriter.close().catch(() => {});
-			this.logger("info", "packetUpWriter.close()");
-		} else if (!this.upload) {
-			// No upstream exists; treat as already closed.
-			this.uploadCanceling = true;
-		}
-
-		if (this.downloadCanceling && this.uploadCanceling && !this.removed) {
-			this.logger("info", "session closed with reason:", reason);
-
-			if (isClean)
-				this._closed.resolve();
-			else
-				this._closed.reject(reason);
-
-			this.removed = true;
+	private clearAssociateTimer() {
+		if (this.associateTimeout) {
+			clearTimeout(this.associateTimeout);
+			this.associateTimeout = null;
+			this.logger("debug", "timer cleared");
 		}
 	}
 
+	private closeUpload() {
+		//this.logger("debug", "closeUpload()");
+		this.clearAssociateTimer();
+
+		if (this.upStreamCloseFunc) {
+			this.upStreamCloseFunc!();
+			this.upStreamCloseFunc = null;
+			this.logger("debug", "close upload stream");
+		}
+	}
+
+	private closeDownload() {
+		this.clearAssociateTimer();
+
+		if (this.downStreamCloseFunc) {
+			this.downStreamCloseFunc!();
+			this.downStreamCloseFunc = null;
+			this.logger("debug", "close download stream");
+		}
+	}
+
+	close() {
+		this.closeDownload();
+		this.closeUpload();
+	}
+
 	summary(): string {
-		return `[${this.id.substring(0, 6)}] ${this.downloadAssociated ? "downloadAssociated " : ""}${this.uploadCanceling ? "uploadCanceling" : ""}${this.uploadAssociated ? "uploadAssociated " : ""}${this.downloadCanceling ? "downloadCanceling" : ""}`;
+		return `[${this.id.substring(0, 6)}] ${this.downloadAssociated ? "downloadAssociated " : ""}${this.upStreamCloseFunc ? "upStreamCloseFunc " : ""}${this.uploadAssociated ? "uploadAssociated " : ""}${this.upStreamCloseFunc ? "upStreamCloseFunc" : ""}`;
 	}
 
 	// For Packet-up only
@@ -207,7 +244,14 @@ class StatefulSession {
 
 		if (!this.packetUpWriter) {
 			const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>();
-			this.packetUpWriter = feedthroughStream.writable.getWriter();
+			const writer = feedthroughStream.writable.getWriter();
+			this.upStreamCloseFunc = () => writer.close();
+			this.packetUpWriter = writer;
+			writer.closed.catch((reason) => {
+				this.logger("info", "this.packetUpWriter.closed.catch", reason);
+			}).finally(() => {
+				this.logger("debug", "packetUpWriter.closed.finally");
+			});
 			this.associateUpload(feedthroughStream.readable, false);
 		}
 
@@ -266,8 +310,8 @@ class StatefulSession {
 					// The first item in the FIFO
 					const item = this.fifo.shift()!;
 
-					await this.packetUpWriter!.ready;
-					await this.packetUpWriter!.write(item.chunk);
+					try { await this.packetUpWriter!.ready; } catch {}
+					try { await this.packetUpWriter!.write(item.chunk); } catch {}
 
 					this.lastEnqueuedSeq = item.seq;
 				}
@@ -358,7 +402,7 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 	if (!session) {
 		session = new StatefulSession(inbound.sessionId, globalConfig);
 		session.closed.finally(() => {
-			context.sessions.delete(inbound.sessionId)
+			context.sessions.delete(inbound.sessionId);
 		});
 		context.sessions.set(inbound.sessionId, session);
 	}
@@ -369,8 +413,9 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 				return new Response("downstream has already associated", { status: 400 });
 			}
 
-			const readable = session.associateDownload();
-			const xPadding = makeXPadding()
+			const endOfRequest = monitorRequestAbort(request);
+			const readable = session.associateDownload(endOfRequest);
+			const xPadding = makeXPadding();
 			const headers = {
 				...COMMON_RESP_HEADERS,
 				"Content-Type": "text/event-stream",
