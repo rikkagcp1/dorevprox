@@ -73,7 +73,8 @@ async function handleForward(request: OutboundRequest, context: OutboundContext,
 	const tcpSocketPromise = context.newTcp(proxyServer, portDest);
 	const tcpSocket = await withTimeout(tcpSocketPromise, 3000, "TCP connection timeout");
 	tcpSocket.closed.catch(error => console.log('[forward] tcpSocket closed with error: ', error.message));
-	context.log("info", logSource, `Forwarding tcp://${request.address}:${request.port} to ${proxyServer}:${portDest}`);
+	const addressString = addressToString(request.address);
+	context.log("info", logSource, `Forwarding tcp://${addressString}:${request.port} to ${proxyServer}:${portDest}`);
 	await writeChunk(tcpSocket.writable, request.firstChunk);
 	return tcpSocket;
 }
@@ -221,7 +222,7 @@ export async function handleOutBound(request: OutboundRequest, globalConfig: Glo
 			return { 
 				readable: newReadable,
 				writable: toDest.writable,
-				close: toDest.close,
+				close: () => toDest.close(),
 				closed: toDest.closed,
 			};
 		} catch(e) {

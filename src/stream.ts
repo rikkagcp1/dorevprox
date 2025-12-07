@@ -131,5 +131,43 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 export async function DuplexStreamOfTcp(hostname: string, port: number) : Promise<DuplexStream> {
 	const socket = connect({hostname, port}, {allowHalfOpen: true});
 	await socket.opened;
-	return socket;
+
+	// When the remote pair starts the close handshake,
+	// Make sure we explicitly call `tcpSocket.close()` after `tcpSocket.writable` closes(unlocked).
+	async function closeOnceUnlocked() {
+		const maxSpins = 10;
+		for (let i = 0; i < maxSpins && socket.writable.locked; i++) {
+			await new Promise(resolve => setTimeout(resolve, 1));
+		}
+		return socket.close();
+	}
+
+	let downStreamRequestClose = false;
+	let upStreamRequestClose = false;
+	const upStream = new TransformStream<Uint8Array, Uint8Array>();
+	upStream.readable.pipeTo(socket.writable)
+		.catch(() => {})
+		.finally(() => {
+			if (downStreamRequestClose) {
+				closeOnceUnlocked();
+			} else {
+				upStreamRequestClose = true;
+			}
+		});
+
+	const downStream = new TransformStream<Uint8Array, Uint8Array>();
+	socket.readable.pipeTo(downStream.writable)
+		.catch(() => {})
+		.finally(() => {
+			if (!upStreamRequestClose) {
+				downStreamRequestClose = true;
+			}
+		});
+
+	return {
+		readable: downStream.readable,
+		writable: upStream.writable,
+		closed: socket.closed,
+		close: () => closeOnceUnlocked(),
+	};
 }

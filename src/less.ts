@@ -284,7 +284,8 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 						const {
 							readable,
 							writable,
-							closed,
+							close,
+							closed: outboundClosed,
 						} = await handleOutBound(
 							{
 								isUDP: !(lessRequest.instruction === InstructionType.TCP),
@@ -297,6 +298,12 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 						);
 						remoteTrafficSink = writable;
 						readable.pipeThrough(lessResponsePrepender(chunkIn => chunkIn)).pipeTo(lessStream.writable);
+						lessStream.closed.finally(() => {
+							close();
+						});
+						outboundClosed.finally(() => {
+							lessStream.close();
+						});
 					} catch(e) {
 						lessStream.close(e);
 					}
@@ -358,6 +365,7 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 		},
 	} as UnderlyingSink<Uint8Array>);
 
+	// Setup upstream
 	lessStream.readable.pipeThrough(lessRequestProcessor)
 		// .pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
 		// 	transform(chunk, controller) {
@@ -366,9 +374,7 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 		// 		controller.enqueue(chunk);
 		// 	},
 		// }))
-		.pipeTo(lessRequestHandler).finally(() => {
-			log("info", "lessStream.readable.pipeThrough(lessRequestProcessor).pipeTo(lessRequestHandler).finally");
-		});
+		.pipeTo(lessRequestHandler);
 }
 
 function makeLessHeaderProcessor() {
