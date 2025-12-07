@@ -31,6 +31,7 @@ class StatefulSession {
 	private readonly _logger;
 
 	private weWantToClose = false;
+	private closeTimeout: any | null = null;
 
 	/**
 	 * Resolves when both data paths are closed and/or aborted.
@@ -50,7 +51,14 @@ class StatefulSession {
 		this.logger = logger;
 		this._logger = (level: LogLevel, ...args: any[]) => logger(level, SessionModes[this.sessionMode], ...args);
 
-		this.closed.finally(() => this._logger("info", "end of stateful session"));
+		this.closed.finally(() => {
+			if (this.closeTimeout !== null) {
+				clearTimeout(this.closeTimeout);
+				this.closeTimeout = null;
+			}
+
+			this._logger("info", "end of stateful session");
+		});
 	}
 
 	private tryHandleRequest() {
@@ -78,8 +86,7 @@ class StatefulSession {
 		if (this.upload === null && this.download === null) {
 			this.associateTimeout = setTimeout(() => {
 				this._logger("info", "associate downstream timeout");
-				this.weWantToClose = true;
-				this.closeUpload();
+				this.close();
 			}, ASSOCIATE_TIMEOUT);
 		}
 
@@ -92,14 +99,14 @@ class StatefulSession {
 	}
 
 	associateStreamUp(upload: ReadableStream<Uint8Array>) {
-		let uploadTerminator! : () => void;
+		let uploadTerminator: () => void;
 		const feedthroughStream = new TransformStream<Uint8Array, Uint8Array>({
 			start: (controller) => {
 				uploadTerminator = () => controller.terminate();
 			},
 		});
 
-		let uploadRequestTerminator! : () => void;
+		let uploadRequestTerminator: () => void;
 		/**
 		 * This ReadableStream just sits there until we close it to signal the end of the POST request.
 		 */
@@ -110,9 +117,16 @@ class StatefulSession {
 		});
 
 		this.upStreamCloseFunc = () => {
-			this._logger("info", "upStreamCloseFunc()");
-			uploadTerminator();
-			uploadRequestTerminator();
+			this._logger("debug", "upStreamCloseFunc()");
+			if (uploadTerminator) {
+				uploadTerminator();
+				this._logger("debug", "uploadTerminator()");
+			}
+
+			if (uploadRequestTerminator) {
+				uploadRequestTerminator();
+				this._logger("debug", "uploadRequestTerminator()");
+			}
 		}
 
 		upload.pipeTo(feedthroughStream.writable).finally(() => {
@@ -137,8 +151,7 @@ class StatefulSession {
 		if (this.upload === null && this.download === null) {
 			this.associateTimeout = setTimeout(() => {
 				this._logger("info", "associate upstream timeout");
-				this.weWantToClose = true;
-				this.closeDownload();
+				this.close();
 			}, ASSOCIATE_TIMEOUT);
 		}
 
@@ -205,21 +218,34 @@ class StatefulSession {
 	}
 
 	private closeUpload() {
-		//this.logger("debug", "closeUpload()");
+		this.logger("debug", "closeUpload()");
 		this.clearAssociateTimer();
 
-		if (this.upStreamCloseFunc) {
-			this.upStreamCloseFunc!();
+		if (this.upStreamCloseFunc !== null) {
+			this.upStreamCloseFunc();
 			this.upStreamCloseFunc = null;
 			this._logger("debug", "close upload stream");
+		}
+
+		if (this.weWantToClose) {
+			// If we start the close handshake,
+			// we give the peer 1s to close the downstream.
+			// Otherwise, we forcely close it.
+			if (this.closeTimeout === null) {
+				this.closeTimeout = setTimeout(() => {
+					clearTimeout(this.closeTimeout);
+					this.closeTimeout = null;
+					this.close();
+				}, 1000);
+			}
 		}
 	}
 
 	private closeDownload() {
 		this.clearAssociateTimer();
 
-		if (this.downStreamCloseFunc) {
-			this.downStreamCloseFunc!();
+		if (this.downStreamCloseFunc !== null) {
+			this.downStreamCloseFunc();
 			this.downStreamCloseFunc = null;
 			this._logger("debug", "close download stream");
 		}
@@ -352,7 +378,7 @@ function handleStateless(requstBody: ReadableStream<Uint8Array>, endOfRequest: P
 
 	let upStreamCloseFunc: (() => void) | null = null;
 	function closeUpload() {
-		if (upStreamCloseFunc) {
+		if (upStreamCloseFunc !== null) {
 			upStreamCloseFunc();
 			upStreamCloseFunc = null;
 			logger("debug", "close upload stream");
@@ -387,7 +413,7 @@ function handleStateless(requstBody: ReadableStream<Uint8Array>, endOfRequest: P
 
 	let downStreamCloseFunc: (() => void) | null = null;
 	function closeDownload() {
-		if (downStreamCloseFunc) {
+		if (downStreamCloseFunc !== null) {
 			downStreamCloseFunc();
 			downStreamCloseFunc = null;
 			logger("debug", "close download stream");
