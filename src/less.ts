@@ -11,6 +11,7 @@ export const enum InstructionType {
 	TCP = 1,
 	UDP = 2,
 	MUX = 3,
+	REV = 4,
 };
 
 export interface LessRequestHeaderPart1 {
@@ -187,9 +188,10 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 				return;
 			}
 
-			if (lessRequest.instruction == InstructionType.TCP &&
+			if ( (lessRequest.instruction == InstructionType.REV) ||
+				(lessRequest.instruction == InstructionType.TCP &&
 				lessRequest.address.addrType == address.AddrType.DomainName &&
-				lessRequest.address.addr === config.portalDomainName) {
+				lessRequest.address.addr === config.portalDomainName) ) {
 				// Reversed proxy
 
 				if (!bridgeContext) {
