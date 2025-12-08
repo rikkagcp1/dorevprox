@@ -37,7 +37,8 @@ export async function DuplexStreamFromWsStream(websocketStream: WebSocketStreamL
 }
 
 export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, log: Logger): DuplexStream {
-	let readableStreamCancel = false;
+	let downStreamRequestClose = false;
+	let upStreamRequestClose = false;
 
 	const {
 		resolve: onWsNormalClose,
@@ -52,7 +53,7 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			}
 			
 			webSocket.addEventListener("message", (event) => {
-				if (readableStreamCancel) {
+				if (downStreamRequestClose || upStreamRequestClose) {
 					return;
 				}
 
@@ -66,14 +67,14 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			// However, the server -> client stream is still open until you call close() on the server side.
 			// The WebSocket protocol says that a separate close message must be sent in each direction to fully close the socket.
 			webSocket.addEventListener("close", (event) => {
-				onWsNormalClose({code: event.code, reason: event.reason});
-
-				// client send close, need close server
-				// if stream is cancel, skip controller.close
-				safeCloseWebSocket(webSocket);
-				if (readableStreamCancel) {
-					return;
+				if (downStreamRequestClose) {
+					log("info", "websocket", "duplex peer wants to close");
+				} else {
+					log("info", "websocket", "websocket peer wants to close");
+					upStreamRequestClose = true;
 				}
+
+				onWsNormalClose({code: event.code, reason: event.reason});
 				controller.close();
 			});
 
@@ -87,14 +88,7 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			// https://streams.spec.whatwg.org/#example-rs-push-backpressure
 		},
 		cancel(reason) {
-			// 1. pipe WritableStream has error, this cancel will called, so ws handle server close into here
-			// 2. if readableStream is cancel, all controller.close/enqueue need skip,
-			// 3. but from testing controller.error still work even if readableStream is cancel
-			if (readableStreamCancel) {
-				return;
-			}
 			log("error", "websocket", `ReadableStream was canceled, due to ${reason}`)
-			readableStreamCancel = true;
 			safeCloseWebSocket(webSocket);
 		}
 	});
@@ -102,58 +96,80 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 	const writable = new WritableStream<Uint8Array>({
 		write: (chunk) => webSocket.send(chunk),
 		close: () => {
-			// The server dont need to close the websocket first, as it will cause ERR_CONTENT_LENGTH_MISMATCH
-			// The client will close the connection anyway.
-			// TODO: Setup a timer to close the websocket after 10 seconds.
-			log("info", "websocket", "writable close()");
-			// server.close()
+			if (upStreamRequestClose) {
+				log("info", "ws", "duplex peer closed");
+				onWsNormalClose({code: 1000});
+			} else {
+				downStreamRequestClose = true;
+			}
+
+			// https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Using_WebSocketStream#closing_the_connection
+			// Closing the underlying WritableStream or WritableStreamDefaultWriter also closes the connection.
+			safeCloseWebSocket(webSocket);
+		},
+		abort(reason) {
+			if (upStreamRequestClose) {
+				log("info", "ws", "duplex peer aborted");
+			} else {
+				downStreamRequestClose = true;
+			}
+
+			try {
+				webSocket.close(1006, reason);
+			} catch {}
 		},
 	});
 
-	closedPromise.then((info) => {
-		log("info", "websocket", `closed normally with code: ${info.code}, reason: ${info.reason}`);
-	});
+	// closedPromise.then((info) => {
+	// 	log("info", "websocket", `closed normally with code: ${info.code}, reason: ${info.reason}`);
+	// });
 
-	closedPromise.catch((error) => {
-		log("error", "websocket", "closed with error:", error);
-	});
+	// closedPromise.catch((error) => {
+	// 	log("error", "websocket", "closed with error:", error);
+	// });
 
 	return {
 		readable,
 		writable,
 		close: () => {
-			webSocket.close();
+			safeCloseWebSocket(webSocket);
 		},
 		closed: closedPromise,
 	}
 }
 
 export async function DuplexStreamOfTcp(hostname: string, port: number) : Promise<DuplexStream> {
+	let downStreamRequestClose = false;
+	let upStreamRequestClose = false;
+
 	const socket = connect({hostname, port}, {allowHalfOpen: true});
 	await socket.opened;
 
-	// When the remote pair starts the close handshake,
-	// Make sure we explicitly call `tcpSocket.close()` after `tcpSocket.writable` closes(unlocked).
-	async function closeOnceUnlocked() {
-		const maxSpins = 10;
-		for (let i = 0; i < maxSpins && socket.writable.locked; i++) {
-			await new Promise(resolve => setTimeout(resolve, 1));
+	const writer = socket.writable.getWriter();
+	writer.closed.finally(async () => {
+		writer.releaseLock();
+		if (downStreamRequestClose) {
+			socket.close();
+		} else {
+			upStreamRequestClose = true;
 		}
-		return socket.close();
-	}
+	});
 
-	let downStreamRequestClose = false;
-	let upStreamRequestClose = false;
-	const upStream = new TransformStream<Uint8Array, Uint8Array>();
-	upStream.readable.pipeTo(socket.writable)
-		.catch(() => {})
-		.finally(() => {
-			if (downStreamRequestClose) {
-				closeOnceUnlocked();
-			} else {
-				upStreamRequestClose = true;
-			}
-		});
+	const writable = new WritableStream<Uint8Array>({
+		write: async (chunk, controller) => {
+			await writer.ready;
+			writer.write(chunk);
+		},
+
+		// When the remote pair starts the close handshake,
+		// Make sure we explicitly call `tcpSocket.close()` after `tcpSocket.writable` closes(unlocked).
+		close: async () => {
+			await writer.close();
+		},
+		abort: async (reason) => {
+			await writer.abort(reason);
+		},
+	});
 
 	const downStream = new TransformStream<Uint8Array, Uint8Array>();
 	socket.readable.pipeTo(downStream.writable)
@@ -166,8 +182,8 @@ export async function DuplexStreamOfTcp(hostname: string, port: number) : Promis
 
 	return {
 		readable: downStream.readable,
-		writable: upStream.writable,
+		writable: writable,
 		closed: socket.closed,
-		close: () => closeOnceUnlocked(),
+		close: () => socket.close().catch(() => {}),
 	};
 }
