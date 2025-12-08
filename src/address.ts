@@ -14,12 +14,12 @@ interface BaseAddress {
 
 export interface IPv4Address extends BaseAddress {
 	addrType: AddrType.IPv4;
-	addr: Uint8Array & { readonly length: 4 };
+	addr: Uint8Array;
 }
 
 export interface IPv6Address extends BaseAddress {
 	addrType: AddrType.IPv6;
-	addr: Uint8Array & { readonly length: 16 };
+	addr: Uint8Array;
 }
 
 export interface DomainAddress extends BaseAddress {

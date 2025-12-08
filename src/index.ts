@@ -91,7 +91,7 @@ export default {
 				const httpInbound = http.parseInboundPath(url.pathname, httpEndpoint);
 				if (httpInbound) {
 					const globalConfig = parseEnv(env);
-					return http.handleHttp(httpInbound, request, null, globalConfig);
+					return http.handleHttp(httpInbound, request, null, null, globalConfig);
 				}
 			} break;
 		}
@@ -132,7 +132,7 @@ export class WebSocketHibernationServer extends DurableObject {
 				} else {
 					const httpInbound = http.parseInboundPath(pathname, httpEndpoint);
 					if (httpInbound) {
-						return await http.handleHttp(httpInbound, request, this.httpContext, this.globalConfig);
+						return await http.handleHttp(httpInbound, request, this.httpContext, this.bridgeContext, this.globalConfig);
 					}
 
 					switch (pathname) {
@@ -150,7 +150,7 @@ export class WebSocketHibernationServer extends DurableObject {
 			case "POST": {
 				const httpInbound = http.parseInboundPath(pathname, httpEndpoint);
 				if (httpInbound) {
-					return await http.handleHttp(httpInbound, request, this.httpContext, this.globalConfig);
+					return await http.handleHttp(httpInbound, request, this.httpContext, this.bridgeContext, this.globalConfig);
 				}
 			} break;
 		}

@@ -1,5 +1,5 @@
 import { LogLevel, createLogger, randomInt, newPromiseWithHandle, monitorRequestAbort } from "./utils";
-import { handlelessRequest } from "./less";
+import { handlelessRequest, BridgeContext } from "./less";
 import { GlobalConfig } from "./config";
 import { connect } from "cloudflare:sockets";
 
@@ -44,6 +44,7 @@ class StatefulSession {
 
 	constructor(
 		readonly id: string,
+		private bridgeContext: BridgeContext | null,
 		readonly globalConfig: GlobalConfig,
 	) {
 		const logPrefix = id.substring(0, 6);
@@ -74,7 +75,7 @@ class StatefulSession {
 					this.close();
 				},
 				closed: this.closed,
-			}, null, this.logger, this.globalConfig);
+			}, this.bridgeContext, this.logger, this.globalConfig);
 		}
 	}
 
@@ -366,7 +367,10 @@ class StatefulSession {
 	}
 }
 
-function handleStateless(requstBody: ReadableStream<Uint8Array>, endOfRequest: Promise<void>, globalConfig: GlobalConfig) {
+function handleStateless(requstBody: ReadableStream<Uint8Array>, endOfRequest: Promise<void>,
+	bridgeContext: BridgeContext | null,
+	globalConfig: GlobalConfig) {
+
 	const uuid = crypto.randomUUID();
 	const logPrefix = uuid.substring(0, 6);
 	const _logger = createLogger(logPrefix);
@@ -444,7 +448,7 @@ function handleStateless(requstBody: ReadableStream<Uint8Array>, endOfRequest: P
 		writable: downStreamFeedthrough.writable,
 		close,
 		closed: _closed.promise
-	}, null, _logger, globalConfig);
+	}, bridgeContext, _logger, globalConfig);
 
 	return new Response(downStreamEcho.readable, {
 		status: 200,
@@ -483,7 +487,11 @@ function makeXPadding() {
 	return "X".repeat(randomInt(100, 1000));
 }
 
-export async function handleHttp(inbound: HttpInbound, request: Request, context: StatefulContext | null, globalConfig: GlobalConfig): Promise<Response> {
+export async function handleHttp(inbound: HttpInbound, request: Request,
+	context: StatefulContext | null,
+	bridgeContext: BridgeContext | null,
+	globalConfig: GlobalConfig) : Promise<Response> {
+
 	const isH1 = request.cf?.httpProtocol === "HTTP/1.1";
 
 	if (inbound.type == "stream-one") {
@@ -493,7 +501,7 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 
 		const requstBody = request.body! as ReadableStream<Uint8Array>;
 		const endOfRequest = monitorRequestAbort(request);
-		return handleStateless(requstBody, endOfRequest, globalConfig);
+		return handleStateless(requstBody, endOfRequest, bridgeContext, globalConfig);
 	}
 
 	if (context === null) {
@@ -502,7 +510,7 @@ export async function handleHttp(inbound: HttpInbound, request: Request, context
 
 	let session = context.sessions.get(inbound.sessionId);
 	if (!session) {
-		session = new StatefulSession(inbound.sessionId, globalConfig);
+		session = new StatefulSession(inbound.sessionId, bridgeContext, globalConfig);
 		session.closed.finally(() => {
 			context.sessions.delete(inbound.sessionId);
 		});

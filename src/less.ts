@@ -17,11 +17,11 @@ export const enum InstructionType {
 export interface LessRequestHeaderPart1 {
 	version: number;
 	uuid: Uint8Array;
+	info: Uint8Array; // A ProtoBuf, not used here
+	instruction: InstructionType;
 }
 
 export interface LessRequestHeaderPart2 {
-	info: Uint8Array; // A ProtoBuf, not used here
-	instruction: InstructionType;
 	port: number;
 	address: address.Address;
 }
@@ -31,11 +31,11 @@ export interface LessRequestHeader extends LessRequestHeaderPart1, LessRequestHe
 export const codecLessRequestHeaderPart1 = codec.codecOf<LessRequestHeader>(
 	{ key: "version", codec: codec.codecU8 },
 	{ key: "uuid", codec: codec.codecOfFixedLenU8Array(16) },
+	{ key: "info", codec: codec.codecU8SizedBytes },
+	{ key: "instruction", codec: codec.codecU8 },
 );
 
 export const codecLessRequestHeaderPart2 = codec.codecOf<LessRequestHeader>(
-	{ key: "info", codec: codec.codecU8SizedBytes },
-	{ key: "instruction", codec: codec.codecU8 },
 	{ key: "port", codec: codec.codecU16BE },
 	{ key: "address", codec: address.codec_address },
 );
@@ -376,7 +376,9 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 		// 		controller.enqueue(chunk);
 		// 	},
 		// }))
-		.pipeTo(lessRequestHandler);
+		.pipeTo(lessRequestHandler).finally(() => {
+			log("debug", "less", "upload finally()");
+		});
 }
 
 function makeLessHeaderProcessor() {
@@ -384,7 +386,6 @@ function makeLessHeaderProcessor() {
 		= codec.createIncrementalDeserializer(codecLessRequestHeaderPart1);
 	let part2Decoder: codec.IncrementalDeserializer<LessRequestHeaderPart2> | null = null;
 	let lessRequestHeaderPart1: LessRequestHeaderPart1 | null = null;
-	let lessRequestHeader: LessRequestHeader | null = null;
 
 	const {
 		resolve: lessRequestHeaderPromiseResolve,
@@ -396,7 +397,7 @@ function makeLessHeaderProcessor() {
 			if (part2Decoder) {
 				const outcome2 = part2Decoder(chunk);
 				if (outcome2.done) {
-					lessRequestHeader = {
+					const lessRequestHeader: LessRequestHeader = {
 						...lessRequestHeaderPart1!,
 						...outcome2.value,
 					};
@@ -410,13 +411,28 @@ function makeLessHeaderProcessor() {
 				const outcome1 = part1Decoder(chunk);
 				if (outcome1.done) {
 					lessRequestHeaderPart1 = outcome1.value;
-					part2Decoder = codec.createIncrementalDeserializer(codecLessRequestHeaderPart2);
 					part1Decoder = null;
+					if (lessRequestHeaderPart1.instruction == InstructionType.MUX ||
+						lessRequestHeaderPart1.instruction == InstructionType.REV) {
+							const lessRequestHeader: LessRequestHeader = {
+								...lessRequestHeaderPart1!,
+								port: 0,
+								address: {
+									addrType: address.AddrType.IPv4,
+									addr: new Uint8Array(4),
+								}
+							};
+						lessRequestHeaderPromiseResolve(lessRequestHeader);
+						controller.enqueue(outcome1.residue);
+						return;
+					}
+	
+					part2Decoder = codec.createIncrementalDeserializer(codecLessRequestHeaderPart2);
 
 					// Immediately check if we are able to parse part2
 					const outcome2 = part2Decoder(outcome1.residue);
 					if (outcome2.done) {
-						lessRequestHeader = {
+						const lessRequestHeader: LessRequestHeader = {
 							...lessRequestHeaderPart1!,
 							...outcome2.value,
 						};
