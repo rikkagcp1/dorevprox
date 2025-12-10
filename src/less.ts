@@ -286,8 +286,6 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 						const {
 							readable,
 							writable,
-							close,
-							closed: outboundClosed,
 						} = await handleOutBound(
 							{
 								isUDP: !(lessRequest.instruction === InstructionType.TCP),
@@ -300,13 +298,8 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 						);
 						remoteTrafficSink = writable;
 						readable.pipeThrough(lessResponsePrepender(chunkIn => chunkIn)).pipeTo(lessStream.writable);
-						lessStream.closed.finally(() => {
-							close();
-						});
-						outboundClosed.finally(() => {
-							lessStream.close();
-						});
 					} catch(e) {
+						log("error", "less/outbound", "failed to find an outbound");
 						lessStream.close(e);
 					}
 
@@ -358,11 +351,15 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 		close: async () => {
 			if (remoteTrafficSink) {
 				await remoteTrafficSink?.close();
+			} else {
+				log("error", "less", "cannot forward close to remoteTrafficSink");
 			}
 		},
 		abort: async (reason) => {
 			if (remoteTrafficSink) {
 				await remoteTrafficSink?.abort(reason);
+			} else {
+				log("error", "less", "cannot forward abort to remoteTrafficSink, abort reason:", reason);
 			}
 		},
 	} as UnderlyingSink<Uint8Array>);
@@ -376,8 +373,11 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 		// 		controller.enqueue(chunk);
 		// 	},
 		// }))
-		.pipeTo(lessRequestHandler).finally(() => {
-			log("debug", "less", "upload finally()");
+		.pipeTo(lessRequestHandler)
+		.then(() => {
+			log("debug", "less", "upload then");
+		},(reason) => {
+			log("error", "less", "upload catch:", reason);
 		});
 }
 

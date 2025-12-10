@@ -10,11 +10,37 @@ import { connect } from "cloudflare:sockets";
  * ```
  */
 export interface DuplexStream {
+	/**
+	 * Our source. We send data to peer from here.
+	 * 
+	 * To notice the peer that this DuplexStream itself wants to close normally, we close the readable on our side.
+	 * To notice the peer that this DuplexStream itself wants to abort, we error the readable on our side.
+	 * 
+	 * If the readable is errored externally, the effect is the same as abort.
+	 * 
+	 * Calling controller.close() on readable does NOT drop already enqueued chunks; they will still be delivered to the peer before the close is observed.
+	 */
 	get readable(): ReadableStream<Uint8Array>,
+
+	/**
+	 * Our sink. We recv data from peer from here.
+	 * 
+	 * Peer closes this writable (e.g. by calling `writable.close()`) to start a close sequence. (e.g. TCP FIN)
+	 * Peer aborts this writable (e.g. by calling `writable.abort()`) to abort the connection. (e.g. TCP RST)
+	 * 
+	 * If we have to abort the DuplexStream, we abort writable.
+	 */
 	get writable(): WritableStream<Uint8Array>,
 
 	/**
-	 * A Promise that resolves when the connection closes.
+	 * A Promise that resolves when:
+	 * 1. We dont have more data for our peer from the underlying source (readable enters closed state)
+	 * AND
+	 * 2. Our peer's underlying source dont have more data for us (writable enters closed state)
+	 * 
+	 * Note:
+	 * Even if this promise settles, there could be chunks in the readable.pipeTo chain.
+	 * 
 	 * May reject in case of abnormal termination (e.g. network error).
 	 */
 	get closed(): Promise<any>,
@@ -37,8 +63,8 @@ export async function DuplexStreamFromWsStream(websocketStream: WebSocketStreamL
 }
 
 export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, log: Logger): DuplexStream {
-	let downStreamRequestClose = false;
-	let upStreamRequestClose = false;
+	let duplexRequestClose = false;
+	let serverWantToClose = false;
 
 	const {
 		resolve: onWsNormalClose,
@@ -53,7 +79,7 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			}
 			
 			webSocket.addEventListener("message", (event) => {
-				if (downStreamRequestClose || upStreamRequestClose) {
+				if (duplexRequestClose || serverWantToClose) {
 					return;
 				}
 
@@ -67,26 +93,31 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			// However, the server -> client stream is still open until you call close() on the server side.
 			// The WebSocket protocol says that a separate close message must be sent in each direction to fully close the socket.
 			webSocket.addEventListener("close", (event) => {
-				if (downStreamRequestClose) {
+				if (duplexRequestClose) {
 					log("info", "websocket", "duplex peer wants to close");
 				} else {
 					log("info", "websocket", "websocket peer wants to close");
-					upStreamRequestClose = true;
+					serverWantToClose = true;
 				}
 
-				onWsNormalClose({code: event.code, reason: event.reason});
-				controller.close();
+				if (event.code === 1000) {
+					controller.close();
+					onWsNormalClose({code: event.code, reason: event.reason});
+				} else {
+					controller.error(event.reason);
+					onWsUncleanClose(event.reason);
+				}
 			});
 
 			webSocket.addEventListener("error", (event) => {
 				onWsUncleanClose(event.error);
-				controller.error(event);
+				controller.error(event.error);
 			});
 		},
-		pull(controller) {
+		//pull(controller) {
 			// if ws can stop read if stream is full, we can implement backpressure
 			// https://streams.spec.whatwg.org/#example-rs-push-backpressure
-		},
+		//},
 		cancel(reason) {
 			log("error", "websocket", `ReadableStream was canceled, due to ${reason}`)
 			safeCloseWebSocket(webSocket);
@@ -94,13 +125,23 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 	});
 
 	const writable = new WritableStream<Uint8Array>({
-		write: (chunk) => webSocket.send(chunk),
+		start: (controller) => {
+			webSocket.addEventListener("error", (event) => {
+				controller.error(event.error);
+			});
+		},
+		write: (chunk) => {
+			if (duplexRequestClose || serverWantToClose) {
+				return;
+			}
+
+			webSocket.send(chunk);
+		},
 		close: () => {
-			if (upStreamRequestClose) {
-				log("info", "ws", "duplex peer closed");
-				onWsNormalClose({code: 1000});
+			if (serverWantToClose) {
+				log("info", "websocket", "to-websocket closed (initiated by websocket peer)");
 			} else {
-				downStreamRequestClose = true;
+				duplexRequestClose = true;
 			}
 
 			// https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Using_WebSocketStream#closing_the_connection
@@ -108,31 +149,29 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			safeCloseWebSocket(webSocket);
 		},
 		abort(reason) {
-			if (upStreamRequestClose) {
+			if (serverWantToClose) {
 				log("info", "ws", "duplex peer aborted");
 			} else {
-				downStreamRequestClose = true;
+				duplexRequestClose = true;
 			}
 
-			try {
-				webSocket.close(1006, reason);
-			} catch {}
+			safeCloseWebSocket(webSocket, 1006, reason);
 		},
 	});
 
-	// closedPromise.then((info) => {
-	// 	log("info", "websocket", `closed normally with code: ${info.code}, reason: ${info.reason}`);
-	// });
+	closedPromise.then((info) => {
+		log("info", "websocket", `closed normally with code: ${info.code}, reason: ${info.reason}`);
+	});
 
-	// closedPromise.catch((error) => {
-	// 	log("error", "websocket", "closed with error:", error);
-	// });
+	closedPromise.catch((error) => {
+		log("error", "websocket", "closed with error:", error);
+	});
 
 	return {
 		readable,
 		writable,
 		close: () => {
-			safeCloseWebSocket(webSocket);
+			console.log("websocket.close()");
 		},
 		closed: closedPromise,
 	}
@@ -146,7 +185,9 @@ export async function DuplexStreamOfTcp(hostname: string, port: number) : Promis
 	await socket.opened;
 
 	const writer = socket.writable.getWriter();
-	writer.closed.finally(async () => {
+	writer.closed.catch((reason)=>{
+		console.log("socket.writable.getWriter().closed.catch", reason);
+	}).finally(async () => {
 		writer.releaseLock();
 		if (downStreamRequestClose) {
 			socket.close();
@@ -172,18 +213,23 @@ export async function DuplexStreamOfTcp(hostname: string, port: number) : Promis
 	});
 
 	const downStream = new TransformStream<Uint8Array, Uint8Array>();
-	socket.readable.pipeTo(downStream.writable)
-		.catch(() => {})
-		.finally(() => {
-			if (!upStreamRequestClose) {
-				downStreamRequestClose = true;
-			}
-		});
+	socket.readable.pipeTo(downStream.writable).then(() => {
+		if (upStreamRequestClose) {
+			socket.close();
+		} else {
+			downStreamRequestClose = true;
+		}
+	}, (reason) => {
+		console.log("tcp.readable cancle or downStream.writable abort");
+		socket.close();
+	});
 
 	return {
 		readable: downStream.readable,
 		writable: writable,
 		closed: socket.closed,
-		close: () => socket.close().catch(() => {}),
+		close: () => {
+			console.log("tcp.close()");
+		},
 	};
 }

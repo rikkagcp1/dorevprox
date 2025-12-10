@@ -243,13 +243,13 @@ export function equalUint8Array(a: Uint8Array, b: Uint8Array): boolean {
 	return true;
 }
 
-export function safeCloseWebSocket(webSocket: WebSocket) {
+export function safeCloseWebSocket(webSocket: WebSocket, code = 1000, reason?: string) {
 	const WS_READY_STATE_OPEN = 1;
 	const WS_READY_STATE_CLOSING = 2;
 
 	try {
 		if (webSocket.readyState === WS_READY_STATE_OPEN || webSocket.readyState === WS_READY_STATE_CLOSING) {
-			webSocket.close();
+			webSocket.close(code, reason);
 		}
 	} catch (error) {
 		console.error('safeCloseWebSocket error', error);
