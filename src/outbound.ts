@@ -1,5 +1,5 @@
 import { Address, addressToString } from "./address";
-import { DuplexStream, DuplexStreamOfTcp } from "./stream";
+import { DuplexStream } from "./stream";
 import { GlobalConfig } from "./config";
 import { NumberMap, newNumberMap, childStringOf, childIntOf, uuidToUint8Array, Logger, withTimeout } from "./utils";
 
@@ -16,9 +16,12 @@ interface OutboundRequest {
 	firstChunk: Uint8Array,
 }
 
-interface OutboundContext {
-	log: Logger,
+export interface SocketFactory {
 	newTcp: (host: string, port: number) => Promise<DuplexStream>,
+}
+
+interface OutboundContext extends SocketFactory {
+	log: Logger,
 }
 
 type OutboundProtocol = "freedom" | "forward" | "socks" | "ws";
@@ -186,7 +189,7 @@ export async function handleOutBound(request: OutboundRequest, globalConfig: Glo
 			// Wait for this handler to establish a remote connection
 			const toDest = await outbound.handler(request, {
 				log,
-				newTcp: DuplexStreamOfTcp,
+				...globalConfig.socketFactory,
 			});
 
 			const remoteReader = toDest.readable.getReader();

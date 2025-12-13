@@ -1,5 +1,6 @@
 import { uuidToUint8Array, equalUint8Array } from "./utils";
-import { OutboundHandler, parseOutboundConfig } from "./outbound";
+import { OutboundHandler, SocketFactory, parseOutboundConfig } from "./outbound";
+import { DuplexStreamOfTcp } from "./socket";
 
 export const enum UUIDUsage {
 	INVALID = -1,
@@ -13,6 +14,7 @@ export interface GlobalConfig {
 	readonly bridgeInternalDomain: string;
 	readonly checkUuid: (uuid: Uint8Array) => UUIDUsage;
 	readonly outbounds: OutboundHandler[];
+	readonly socketFactory: SocketFactory;
 }
 
 export function parseEnv(env: Env) : GlobalConfig {
@@ -72,5 +74,8 @@ export function parseEnv(env: Env) : GlobalConfig {
 			return UUIDUsage.INVALID;
 		},
 		outbounds,
+		socketFactory: {
+			newTcp: DuplexStreamOfTcp,
+		}
 	};
 }
