@@ -1,9 +1,19 @@
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket as WebSocketFromLib } from "ws";
+import * as net from "node:net";
 
 import { WebSocketCloseInfoLike } from "../src/wsstream";
 import { DuplexStream } from "../src/stream";
-import { Logger, newPromiseWithHandle } from "../src/utils";
+import {
+	Logger, createLogger,
+	newPromiseWithHandle,
+	base64ToUint8Array, equalUint8Array, uuidToUint8Array
+} from "../src/utils";
+import { handlelessRequest, BridgeContext } from "../src/less";
+import { UUIDUsage, GlobalConfig } from "../src/config";
+import { parseOutboundConfig } from "../src/outbound";
+
+const textEncoder = new TextEncoder();
 
 function safeCloseWebSocket(webSocket: WebSocketFromLib, code = 1000, reason?: string) {
 	const WS_READY_STATE_OPEN = 1;
@@ -42,11 +52,11 @@ function DuplexStreamFromWs(webSocket: WebSocketFromLib, earlyData: Uint8Array, 
 				// Make sure that we use Uint8Array through out the process.
 				// On Nodejs, event.data can be a Buffer or an ArrayBuffer
 				// On Cloudflare Workers, event.data tend to be an ArrayBuffer
-				let value = event.data;
+				const value = event.data;
 				if (value instanceof Uint8Array)
 					controller.enqueue(value);
 				else if (typeof value === "string")
-					controller.enqueue(new TextEncoder().encode(value));
+					controller.enqueue(textEncoder.encode(value));
 				else if (value instanceof ArrayBuffer)
 					controller.enqueue(new Uint8Array(value));
 				else
@@ -132,7 +142,7 @@ function DuplexStreamFromWs(webSocket: WebSocketFromLib, earlyData: Uint8Array, 
 		},
 		close: () => {
 			if (serverWantToClose) {
-				log("info", "websocket", "to-websocket closed (initiated by websocket peer)");
+				log("info", "websocket", "to-websocket closed");
 			} else {
 				duplexRequestClose = true;
 			}
@@ -168,6 +178,125 @@ function DuplexStreamFromWs(webSocket: WebSocketFromLib, earlyData: Uint8Array, 
 	}
 }
 
+async function DuplexStreamFromTcp(hostname: string, port: number): Promise<DuplexStream> {
+	const client = new net.Socket({
+		allowHalfOpen: true,
+	});
+
+	const host = (hostname.startsWith('[') && hostname.endsWith(']')) ? hostname.slice(1, -1) : hostname;
+	const opened = newPromiseWithHandle();
+	client.once("error", opened.reject);
+	client.connect({
+		host,
+		port,
+	}, opened.resolve);
+	await opened.promise;
+
+	const closed = newPromiseWithHandle(); 
+
+	const readable = new ReadableStream<Uint8Array>({
+		start: (controller) => {
+			client.on("error", (error) => {
+				try { controller.error(error); } catch {}
+				closed.reject(error);
+			});
+
+			client.on("data", (data) => {
+				if (data instanceof Uint8Array)
+					controller.enqueue(data);
+				else if (typeof data === "string")
+					controller.enqueue(textEncoder.encode(data));
+				else
+					controller.error(new TypeError(`Unsupported chunk type: ${typeof data}`));
+
+				if (!client.isPaused() && controller.desiredSize !== null && controller.desiredSize <= 0) {
+					client.pause();
+				}
+			});
+
+			client.on("end", () => {
+				if (client.readyState === "writeOnly") {
+					console.log("tcp: TCP peer send FIN, start close handshake");
+					controller.close();
+				} else if (client.readyState === "closed") {
+					closed.resolve();
+				}
+			})
+
+			client.on("finish", () => {
+				if (client.readyState === "readOnly") {
+					console.log("tcp: got FIN from tcp peer, TCP close handshake completes");
+					controller.close();
+				} else if (client.readyState === "closed") {
+					closed.resolve();
+				}
+			});
+		},
+		pull: (controller) => {
+			if (client.isPaused())
+				client.resume();
+		},
+		cancel: (reason) => {
+			console.log("tcp: duplex peer cancelled: ", reason);
+			client.resetAndDestroy();
+		},
+	});
+
+	const writable = new WritableStream<Uint8Array>({
+		start: (controller) => {
+			client.on("error", (error) => {
+				try { controller.error(error); } catch {}
+			});
+		},
+		write: async (chunk) => {
+			if (client.readyState !== "open" && client.readyState !== "writeOnly")
+				return;
+
+			const {
+				resolve: onSendOkay,
+				reject: onSendFailed,
+				promise: sent,
+			} = newPromiseWithHandle();
+
+			client.write(chunk, (error) => {
+				if (error) {
+					onSendFailed(error)
+				} else {
+					onSendOkay();
+				}
+			});
+
+			await sent;
+		},
+		close: async () => {
+			if (client.readyState === "open") {
+				console.log("tcp: duplex peer requires a TCP close handshake");
+			} else {
+				console.log("tcp: send FIN to close finish TCP close handshake");
+			}
+			return new Promise<void>(resolve => client.end(resolve));
+		},
+		abort: (reason)  => {
+			if (client.readyState === "open") {
+				console.log("tcp: duplex peer wants to abort the TCP connection: ", reason);
+				client.resetAndDestroy();
+			}
+		},
+	});
+
+	closed.promise.then(() => {
+		console.log("tcp: closed resolved");
+	}, (error) => {
+		console.log("tcp: closed rejected: ", error);
+	})
+
+	return {
+		readable, writable,
+		closed: closed.promise,
+		close: () => console.log("tcp.close()")
+	}
+}
+
 // ---- HTTP/1.1 server + Upgrade -> WebSocket ----
 
 const server = createServer((req, res) => {
@@ -177,6 +306,35 @@ const server = createServer((req, res) => {
 
 // ws server in "noServer" mode; we manually handle upgrade on the http server.
 const wss = new WebSocketServer({ noServer: true });
+const uuid_portal = uuidToUint8Array("8d46562e-9530-4c01-9fae-972bf9c209c5");
+const uuid_client = uuidToUint8Array("61ade8f1-b8cf-4265-a631-9251b1a55724");
+const uuid_user = uuidToUint8Array("15627d34-cce2-4add-9bff-68312ab8e1da");
+const bridgeContext = new BridgeContext();
+
+const globalConfig: GlobalConfig = {
+	portalDomainName: "portal.internal",
+	bridgeInternalDomain: "reverse",
+	checkUuid: (uuid) => {
+		if (equalUint8Array(uuid, uuid_portal))
+			return UUIDUsage.PORTAL_JOIN;
+
+		if (equalUint8Array(uuid, uuid_client))
+			return UUIDUsage.TO_PORTAL;
+
+		if (equalUint8Array(uuid, uuid_user))
+			return UUIDUsage.TO_FREEDOM;
+
+		return UUIDUsage.INVALID;
+	},
+	outbounds: parseOutboundConfig([
+		{
+			protocol: "freedom"
+		}
+	]),
+	socketFactory: {
+		newTcp: DuplexStreamFromTcp,
+	}
+}
 
 server.on("upgrade", (request, socket, head) => {
 	// accept any path; just ensure it's websocket upgrade
@@ -187,68 +345,19 @@ server.on("upgrade", (request, socket, head) => {
 	}
 
 	wss.handleUpgrade(request, socket, head, (ws) => {
-		// Wrap into your DuplexStream-like object
-		const ds = DuplexStreamFromWs(ws, new Uint8Array(0), (level, source, ...args) => {
-			console.log(source, ...args);
-		});
+		const earlyDataHeader = request.headers["sec-websocket-protocol"] || '';
+		const earlyDataParseResult = base64ToUint8Array(earlyDataHeader);
+		if (!earlyDataParseResult.success) {
+			return new Response(null, { status: 500 });
+		}
 
-		let errorReadable!: (reason?: any) => void;
-		ds.readable.pipeTo(new WritableStream({
-			start(controller) {
-				errorReadable = (reason) => {
-					try {
-						controller.error(reason);
-					} catch {};
-				}
-			},
-			async write(chunk) {
-				console.log(`Got ${chunk.byteLength} of data.`);
-			},
-			async close() {
-				console.log("ds.readable.pipeTo close");
-			},
-			async abort(reason) {
-				console.log("ds.readable.pipeTo abort: ", reason);
-			},
-		})).catch(() => {});
-
-		const writer = ds.writable.getWriter();
-		writer.closed.then(() => {
-			console.log("Writer closed");
-		}, (e) => {
-			console.log("Writer closed with error: ", e);
-		});
-
-		let i = 0;
-		const encoder = new TextEncoder();
-		const timer = setInterval(async () => {
-			if (i < 3) {
-				i++;
-				try {
-					await writer.ready;
-					writer.write(encoder.encode(`${i}\n`)).catch((e) => {
-						console.log("write failed with:", e);
-					});
-				} catch { }
-			} else {
-				clearInterval(timer);
-				await writer.ready;
-				await writer.close();
-				// await writer.abort("QAQ");
-				//ds.readable.cancel();
-				// errorReadable("qwQ");
-				console.log("await writer.close();");
-			}
-		}, 1000);
-
-		ds.closed.then(
-			() => console.log("ds.closed.then"),
-			(e) => console.log("ds.closed.catch:", e),
-		);
+		const uuid = crypto.randomUUID();
+		const logPrefix = uuid.substring(0, 6);
+		const logger = createLogger(logPrefix);
+	
+		const lessStream = DuplexStreamFromWs(ws, earlyDataParseResult.data, logger);
+		handlelessRequest(lessStream, bridgeContext, logger, globalConfig);
 	});
 });
 
-server.listen(8000, () => {
-	console.log("HTTP/1.1 listening on http://127.0.0.1:8000");
-	console.log("WebSocket upgrade supported on same port (any path).");
-});
+server.listen(8787);

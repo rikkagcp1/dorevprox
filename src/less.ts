@@ -200,14 +200,14 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 
 				if (!bridgeContext) {
 					log("error", "less/bridge", "No in-memory state, cannot support bridge!");
-					lessStream.close();
+					lessStream.writable.close();
 					return;
 				}
 
 				// Check uuid
 				if (config.checkUuid(lessRequest.uuid) !== UUIDUsage.PORTAL_JOIN) {
 					log("warn", "less/bridge", "Portal UUID is invalid!");
-					lessStream.close();
+					lessStream.writable.close();
 					return;
 				}
 
@@ -253,7 +253,7 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 				const uuidUsage = config.checkUuid(lessRequest.uuid);
 				if (uuidUsage === UUIDUsage.INVALID || uuidUsage === UUIDUsage.PORTAL_JOIN) {
 					log("warn", "less", "UUID is invalid");
-					lessStream.close();
+					lessStream.writable.close();
 					return;
 				}
 				const protocolString = lessRequest.instruction == InstructionType.TCP ? "TCP" : "UDP";
@@ -304,7 +304,7 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 						readable.pipeThrough(lessResponsePrepender(chunkIn => chunkIn)).pipeTo(lessStream.writable);
 					} catch(e) {
 						log("error", "less/outbound", "failed to find an outbound");
-						lessStream.close(e);
+						lessStream.writable.close();
 					}
 
 					return;
@@ -313,14 +313,14 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 				// Handle Client->Portal
 				if (!bridgeContext) {
 					log("error", "less/bridge", "No in-memory state, cannot support bridge!");
-					lessStream.close();
+					lessStream.writable.close();
 					return;
 				}
 
 				const mux = bridgeContext.findPortal();
 				if (mux == null) {
 					console.error("[Portal] no portal available");
-					lessStream.close();
+					lessStream.writable.close();
 					return;
 				}
 
