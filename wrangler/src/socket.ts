@@ -1,4 +1,4 @@
-import { DuplexStream } from "./stream";
+import { DuplexStream } from "../../src/stream";
 import { connect } from "cloudflare:sockets";
 
 export async function DuplexStreamOfTcp(hostname: string, port: number) : Promise<DuplexStream> {

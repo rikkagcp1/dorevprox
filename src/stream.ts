@@ -99,34 +99,39 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 					serverWantToClose = true;
 				}
 
-				if (event.code === 1000) {
-					controller.close();
+				if (event.code === 1000 || event.code === 1001 || event.code === 1005) {
+					try { controller.close(); } catch {}
 					onWsNormalClose({code: event.code, reason: event.reason});
 				} else {
-					controller.error(event.reason);
+					try { controller.error(event.reason); } catch {}
 					onWsUncleanClose(event.reason);
 				}
 			});
 
 			webSocket.addEventListener("error", (event) => {
 				onWsUncleanClose(event.error);
-				controller.error(event.error);
+				try { controller.error(event.error); } catch {}
 			});
 		},
 		//pull(controller) {
 			// if ws can stop read if stream is full, we can implement backpressure
 			// https://streams.spec.whatwg.org/#example-rs-push-backpressure
 		//},
-		cancel(reason) {
-			log("error", "websocket", `ReadableStream was canceled, due to ${reason}`)
-			safeCloseWebSocket(webSocket);
+		cancel: (reason) => {
+			if (serverWantToClose) {
+				log("info", "websocket", "duplex peer cancelled: ", reason);
+			} else {
+				duplexRequestClose = true;
+			}
+
+			safeCloseWebSocket(webSocket, 1011, reason);
 		}
 	});
 
 	const writable = new WritableStream<Uint8Array>({
 		start: (controller) => {
 			webSocket.addEventListener("error", (event) => {
-				controller.error(event.error);
+				try { controller.error(event.error); } catch {}
 			});
 		},
 		write: (chunk) => {
@@ -147,14 +152,14 @@ export function DuplexStreamFromWs(webSocket: WebSocket, earlyData: Uint8Array, 
 			// Closing the underlying WritableStream or WritableStreamDefaultWriter also closes the connection.
 			safeCloseWebSocket(webSocket);
 		},
-		abort(reason) {
+		abort: (reason) => {
 			if (serverWantToClose) {
-				log("info", "ws", "duplex peer aborted");
+				log("info", "websocket", "duplex peer aborted: ", reason);
 			} else {
 				duplexRequestClose = true;
 			}
 
-			safeCloseWebSocket(webSocket, 1006, reason);
+			safeCloseWebSocket(webSocket, 1011, reason);
 		},
 	});
 

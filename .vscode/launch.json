@@ -13,6 +13,9 @@
             "env": {
               "TS_NODE_PROJECT": "${workspaceFolder}/nodejs/tsconfig.json"
             },
+            "runtimeArgs": [
+                "--import=tsx"
+            ],
             "skipFiles": ["<node_internals>/**"]
         },
         {
@@ -21,7 +24,7 @@
             "preLaunchTask": "npm: dev",
             "request": "attach",
             "port": 9229,
-            "cwd": "/",
+            "cwd": "${workspaceFolder}/wrangler",
             "resolveSourceMapLocations": null,
             "attachExistingChildren": false,
             "autoAttachChildProcesses": false

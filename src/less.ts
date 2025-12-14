@@ -51,7 +51,7 @@ export const codecLessResponseHeader = codec.codecOf<LessResponseHeader>(
 );
 
 function createTestSource(dest: muxcool.MuxcoolConnectionInfo | null, interval: number, count?: number) {
-	let taskId = NaN;
+	let taskId: any = null;
 	return new ReadableStream<fairmux.Datagram>({
 		start(controller) {
 			console.log("[TestSource] started");
@@ -79,23 +79,25 @@ function createTestSource(dest: muxcool.MuxcoolConnectionInfo | null, interval: 
 		},
 		cancel(reason) {
 			console.log("[TestSource] stopped");
-			if (!Number.isNaN(taskId))
+			if (taskId !== null) {
+				taskId = null;
 				clearInterval(taskId);
+			}
 		},
 	});
 }
 
 function createDummySink(prefix = "") {
 	return new WritableStream<fairmux.Datagram>({
-		write: (chunk, controller) => {
+		write: (chunk) => {
 			console.log(`${prefix} Sent to remote sink: ${chunk.data.byteLength} bytes`);
 			utils.hexdump(chunk.data);
 		},
-	} as UnderlyingSink<fairmux.Datagram>)
+	});
 }
 
 function createMasterKeepalive(internalDomain: string, log: utils.Logger): ReadableStream<fairmux.Datagram> {
-	let taskId = NaN;
+	let taskId: any = null;
 	return new ReadableStream({
 		start(controller) {
 			log("debug", "less/bridge", "Master keepalive started");
@@ -129,8 +131,10 @@ function createMasterKeepalive(internalDomain: string, log: utils.Logger): Reada
 		},
 		cancel(reason) {
 			log("debug", "less/bridge", "Master keepalive stopped");
-			if (!Number.isNaN(taskId))
+			if (taskId !== null) {
+				taskId = null;
 				clearInterval(taskId);
+			}
 		},
 	});
 }
@@ -173,8 +177,8 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 	const { parser: lessRequestProcessor, lessHeaderPromise: lessRequestPromise } = makeLessHeaderProcessor();
 
 	let remoteTrafficSink: WritableStream<Uint8Array> | null = null;
-	const lessRequestHandler = new WritableStream({
-		async write(chunk, controller) {
+	const lessRequestHandler = new WritableStream<Uint8Array>({
+		write: async(chunk, controller) => {
 			const lessRequest = await lessRequestPromise;
 
 			if (remoteTrafficSink && chunk.byteLength > 0) {
@@ -362,7 +366,7 @@ export function handlelessRequest(lessStream: DuplexStream, bridgeContext: Bridg
 				log("error", "less", "cannot forward abort to remoteTrafficSink, abort reason:", reason);
 			}
 		},
-	} as UnderlyingSink<Uint8Array>);
+	});
 
 	// Setup upstream
 	lessStream.readable.pipeThrough(lessRequestProcessor)

@@ -8,9 +8,9 @@
 		/* Specify a set of bundled library declaration files that describe the target runtime environment. */
 		"lib": ["es2020"],
 		/* Specify what module code is generated. */
-		"module": "nodenext",
+		"module": "es2020",
 		/* Specify how TypeScript looks up a file from a given module specifier. */
-		"moduleResolution": "nodenext",
+		"moduleResolution": "node",
 		/* Enable importing .json files */
 		"resolveJsonModule": true,
 
@@ -33,5 +33,7 @@
 		"skipLibCheck": true,
 
 		"types": ["node"]
-	}
+	},
+
+	"include": ["./index.ts", "../src/**/*.ts"]
 }

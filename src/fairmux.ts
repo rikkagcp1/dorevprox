@@ -81,7 +81,7 @@ export class FairMux {
 	 * Traffic to be demuxed
 	 */
 	readonly in: WritableStream<muxcool.MuxcoolFrame> = new WritableStream<muxcool.MuxcoolFrame>({
-		write: async (chunk, controller) => {
+		write: async (chunk) => {
 			const st = this.inputs.get(chunk.header.id);
 			if (!st) {
 				console.debug(`[FairMux.demux] unknown sublink ${chunk.header.id}, opcode=${chunk.header.opcode}`);
@@ -135,7 +135,7 @@ export class FairMux {
 				this.available();
 			}
 		},
-	} as UnderlyingSink<muxcool.MuxcoolFrame>)
+	});
 
 	async terminate(wasClean: boolean, reason?: any) {
 		if (this.terminated)

@@ -195,9 +195,6 @@ class StatefulSession {
 			flush: (controller) => {
 				this._logger("debug", "associateDownload feedthroughStream flush");
 			},
-			cancel: (reason) => {
-				this._logger("debug", "associateDownload feedthroughStream cancel");
-			},
 		});
 
 		const identityStream = new TransformStream<Uint8Array, Uint8Array>();
@@ -486,11 +483,10 @@ function makeXPadding() {
 }
 
 export async function handleHttp(inbound: HttpInbound, request: Request,
+	isH1: boolean,
 	context: StatefulContext | null,
 	bridgeContext: BridgeContext | null,
 	globalConfig: GlobalConfig) : Promise<Response> {
-
-	const isH1 = request.cf?.httpProtocol === "HTTP/1.1";
 
 	if (inbound.type == "stream-one") {
 		if (isH1) {

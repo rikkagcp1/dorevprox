@@ -7,6 +7,9 @@
 	"name": "dorevprox",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-11-17",
+	"compatibility_flags": [
+		"enable_request_signal"
+	],
 	"workers_dev": true,
 	"routes": [
 		{

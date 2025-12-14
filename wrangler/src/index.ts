@@ -1,9 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import * as less from "./less"
-import * as http from "./http";
-import * as utils from "./utils"
-import { DuplexStreamFromWs } from "./stream"
-import { GlobalConfig, parseEnv } from "./config"
+import * as less from "../../src/less"
+import * as http from "../../src/http";
+import * as utils from "../../src/utils"
+import { DuplexStreamFromWs } from "../../src/stream"
+import { GlobalConfig } from "../../src/config"
+import { parseEnv } from "./config"
 
 const durableObjEndpoint = "/do";
 const httpEndpoint = "/http";
@@ -64,6 +65,10 @@ function handleWs(request: Request, bridgeContext: less.BridgeContext | null, co
 	});
 }
 
+function isH1(request: Request) {
+	return request.cf?.httpProtocol === "HTTP/1.1";
+}
+
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
@@ -91,7 +96,8 @@ export default {
 				const httpInbound = http.parseInboundPath(url.pathname, httpEndpoint);
 				if (httpInbound) {
 					const globalConfig = parseEnv(env);
-					return http.handleHttp(httpInbound, request, null, null, globalConfig);
+
+					return http.handleHttp(httpInbound, request, isH1(request), null, null, globalConfig);
 				}
 			} break;
 		}
@@ -132,7 +138,7 @@ export class WebSocketHibernationServer extends DurableObject {
 				} else {
 					const httpInbound = http.parseInboundPath(pathname, httpEndpoint);
 					if (httpInbound) {
-						return await http.handleHttp(httpInbound, request, this.httpContext, this.bridgeContext, this.globalConfig);
+						return await http.handleHttp(httpInbound, request, isH1(request), this.httpContext, this.bridgeContext, this.globalConfig);
 					}
 
 					switch (pathname) {
@@ -150,7 +156,7 @@ export class WebSocketHibernationServer extends DurableObject {
 			case "POST": {
 				const httpInbound = http.parseInboundPath(pathname, httpEndpoint);
 				if (httpInbound) {
-					return await http.handleHttp(httpInbound, request, this.httpContext, this.bridgeContext, this.globalConfig);
+					return await http.handleHttp(httpInbound, request, isH1(request), this.httpContext, this.bridgeContext, this.globalConfig);
 				}
 			} break;
 		}
