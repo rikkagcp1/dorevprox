@@ -1,0 +1,19 @@
+{
+	"name": "node-test",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "tsx index.ts",
+		"build": "tsc"
+	},
+	"devDependencies": {
+		"@types/node": "^25",
+		"@types/ws": "^8.18.1",
+		"tsx": "^4",
+		"typescript": "^5.5.2"
+	},
+	"dependencies": {
+		"ws": "^8.18.3"
+	}
+}

@@ -5,6 +5,17 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "type": "node",
+            "request": "launch",
+            "name": "Node",
+            "cwd": "${workspaceFolder}/nodejs",
+            "program": "${workspaceFolder}/nodejs/index.ts",
+            "env": {
+              "TS_NODE_PROJECT": "${workspaceFolder}/nodejs/tsconfig.json"
+            },
+            "skipFiles": ["<node_internals>/**"]
+        },
+        {
             "name": "Wrangler",
             "type": "node",
             "preLaunchTask": "npm: dev",

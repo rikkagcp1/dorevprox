@@ -1,19 +1,15 @@
 {
-	"name": "dotest",
+	"name": "doprevprox",
 	"version": "0.0.0",
 	"private": true,
-	"type": "module",
 	"scripts": {
-		"dev_node": "tsx nodejs/index.ts",
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
 		"start": "wrangler dev",
 		"cf-typegen": "wrangler types"
 	},
 	"devDependencies": {
-		"@types/node": "^24.10.1",
-		"tsx": "^4",
 		"typescript": "^5.5.2",
-		"wrangler": "^4.42.2"
+		"wrangler": "^4.54.0"
 	}
 }
