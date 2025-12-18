@@ -1,4 +1,4 @@
-import { LogLevel, createLogger, randomInt, newPromiseWithHandle, monitorRequestAbort } from "./utils";
+import { LogLevel, createLogger, randomInt, newPromiseWithHandle } from "./utils";
 import { handlelessRequest, BridgeContext } from "./less";
 import { GlobalConfig } from "./config";
 
@@ -62,6 +62,11 @@ class StatefulSession {
 			this._logger("info", "download closes noramlly");
 		}, (reason)=>{
 			this._logger("info", "download closes with error: ", reason);
+		}).finally(() => {
+			if (this.upload === null) {
+				// No upload ever associated
+				this.uploadDone.resolve();
+			}
 		});
 		Promise.allSettled([this.downloadDone.promise, this.uploadDone.promise]).then(([downloadDone]) => {
 			// uploadDone will never reject
@@ -168,7 +173,7 @@ class StatefulSession {
 	 * In response, we should close the client->server stream.
 	 * @returns 
 	 */
-	associateDownload(endOfRequest: Promise<void>) {
+	associateDownload(endOfRequest: AbortSignal) {
 		if (this.download) {
 			throw new Error("already associated");
 		}
@@ -180,7 +185,7 @@ class StatefulSession {
 			}, ASSOCIATE_TIMEOUT);
 		}
 
-		endOfRequest.finally(() => {
+		endOfRequest.addEventListener("abort", () => {
 			this._logger("info", "client-side wants to close");
 			this.closeUpload();
 		});
@@ -367,7 +372,7 @@ class StatefulSession {
 	}
 }
 
-function handleStateless(requstBody: ReadableStream<Uint8Array>, endOfRequest: Promise<void>,
+function handleStateless(requstBody: ReadableStream<Uint8Array>, endOfRequest: AbortSignal,
 	bridgeContext: BridgeContext | null,
 	globalConfig: GlobalConfig) {
 
@@ -421,7 +426,7 @@ function handleStateless(requstBody: ReadableStream<Uint8Array>, endOfRequest: P
 		},
 	});
 
-	endOfRequest.finally(() => {
+	endOfRequest.addEventListener("abort", () => {
 		_logger("info", "client-side wants to close");
 		closeUpload();
 	});
@@ -482,7 +487,13 @@ function makeXPadding() {
 	return "X".repeat(randomInt(100, 1000));
 }
 
-export async function handleHttp(inbound: HttpInbound, request: Request,
+export async function handleHttp(
+	inbound: HttpInbound,
+	request: {
+		method: string,
+		signal: AbortSignal,
+		get body(): ReadableStream<any> | null,
+	},
 	isH1: boolean,
 	context: StatefulContext | null,
 	bridgeContext: BridgeContext | null,
@@ -494,8 +505,7 @@ export async function handleHttp(inbound: HttpInbound, request: Request,
 		}
 
 		const requstBody = request.body! as ReadableStream<Uint8Array>;
-		const endOfRequest = monitorRequestAbort(request);
-		return handleStateless(requstBody, endOfRequest, bridgeContext, globalConfig);
+		return handleStateless(requstBody, request.signal, bridgeContext, globalConfig);
 	}
 
 	if (context === null) {
@@ -517,8 +527,7 @@ export async function handleHttp(inbound: HttpInbound, request: Request,
 				return new Response("downstream has already associated", { status: 400 });
 			}
 
-			const endOfRequest = monitorRequestAbort(request);
-			const readable = session.associateDownload(endOfRequest);
+			const readable = session.associateDownload(request.signal);
 			const xPadding = makeXPadding();
 			const headers = {
 				...COMMON_RESP_HEADERS,
@@ -559,7 +568,25 @@ export async function handleHttp(inbound: HttpInbound, request: Request,
 			});
 		}
 	} else { // Packet-up upload
-		session.packetIn(inbound.seq, await request.bytes());
+		// We read the entire POST body, no streaming here!
+		const body = request.body!;
+		let byteLength = 0;
+		const chunks: Uint8Array[] = [];
+		for await (const chunk of body) {
+			chunks.push(chunk);
+			byteLength += chunk.byteLength;
+		}
+	
+		const postBody = chunks.length === 1 ? chunks[0] : new Uint8Array(byteLength);
+		if (chunks.length > 1) {
+			let offset = 0;
+			for (const chunk of chunks) {
+				postBody.set(chunk, offset);
+				offset += chunk.length;
+			}
+		}
+
+		session.packetIn(inbound.seq, postBody);
 		return new Response(null, {
 			status: 200,
 			headers: {"X-Padding": makeXPadding() }

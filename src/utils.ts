@@ -257,15 +257,6 @@ export function safeCloseWebSocket(webSocket: WebSocket, code = 1000, reason?: s
 }
 
 /**
- * @return A promise that resolves when the given request aborts (actively canceled by the request sender)
- */
-export function monitorRequestAbort(request: Request) {
-	return new Promise<void>((resolve) => {
-		request.signal.addEventListener("abort", () => resolve());
-	});
-}
-
-/**
  * Wraps a promise with a timeout.
  *
  * @typeParam T - The resolved value type of {@link promise}.
