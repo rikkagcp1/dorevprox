@@ -52,11 +52,11 @@ async function handleFreedom(request: OutboundRequest, context: OutboundContext,
 		throw new Error("UDP unimplemented!");
 	}
 
-	// Handle TCP
+	context.log("info", logSource, `Connecting to tcp://${addressString}:${request.port}`);
+
 	const tcpSocket = await context.newTcp(addressString, request.port);
 	tcpSocket.closed.then(() => context.log("info", logSource, "TCP Closed"));
 	tcpSocket.closed.catch(error => context.log("info", logSource, "Tcp socket closed with error: ", error.message));
-	context.log("info", logSource, `Connecting to tcp://${addressString}:${request.port}`);
 	await writeChunk(tcpSocket.writable, request.firstChunk);
 	return tcpSocket;
 }
@@ -73,11 +73,12 @@ async function handleForward(request: OutboundRequest, context: OutboundContext,
 		}
 	}
 
+	const addressString = addressToString(request.address);
+	context.log("info", logSource, `Forwarding tcp://${addressString}:${request.port} to ${proxyServer}:${portDest}`);
+
 	const tcpSocketPromise = context.newTcp(proxyServer, portDest);
 	const tcpSocket = await withTimeout(tcpSocketPromise, 3000, "TCP connection timeout");
 	tcpSocket.closed.catch(error => console.log('[forward] tcpSocket closed with error: ', error.message));
-	const addressString = addressToString(request.address);
-	context.log("info", logSource, `Forwarding tcp://${addressString}:${request.port} to ${proxyServer}:${portDest}`);
 	await writeChunk(tcpSocket.writable, request.firstChunk);
 	return tcpSocket;
 }
